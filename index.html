@@ -1496,7 +1496,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
                     {t.requestor && <span>👤 {t.requestor}</span>}
                     {t.site      && <span>📍 {t.site}</span>}
                     {t.phone && <span>📞 {t.phone}</span>}
-                    {t.notes     && <span>📝 {t.notes}</span>}
+                    {t.notes     && <span>📝 {t.notes.length>40 ? t.notes.slice(0,40)+"…" : t.notes}</span>}
                   </div>
                 </div>
                 <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
