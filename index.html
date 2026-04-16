@@ -884,44 +884,105 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
         })}
       </div>
 
+      {/* ── Modal backdrop ── */}
+      {(locEdit!==undefined&&locEdit!==null||section==="locations"&&locForm._open||section==="requestors"&&reqForm._open) && (
+        <div onClick={function(){
+          setLocForm({name:"",address:"",campus:"",_open:false});
+          setLocEdit(null);
+          setReqForm({name:"",email:"",phone:"",department:"",_open:false});
+          setReqEdit(null);
+        }} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:999}}/>
+      )}
+
+      {/* ── Location modal ── */}
+      {(locForm._open) && (
+        <div style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",zIndex:1000,background:"#1e293b",borderRadius:14,border:"1px solid #334155",padding:"28px 32px",width:"min(560px,92vw)",boxShadow:"0 24px 60px rgba(0,0,0,0.5)"}}>
+          <div style={{fontFamily:"'Geist',sans-serif",fontWeight:700,fontSize:16,color:"#f1f5f9",marginBottom:20}}>{locEdit?"Edit Location":"Add Location"}</div>
+          <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:20}}>
+            <div>
+              <label style={labelStyle}>Location Name *</label>
+              <input value={locForm.name} onChange={function(e){ setLocForm(function(f){ return {...f,name:e.target.value}; }); }}
+                placeholder="e.g. Main Campus Bldg A" style={inputStyle} autoFocus/>
+            </div>
+            <div>
+              <label style={labelStyle}>Campus</label>
+              <select value={locForm.campus||""} onChange={function(e){ setLocForm(function(f){ return {...f,campus:e.target.value}; }); }} style={inputStyle}>
+                <option value="">— None —</option>
+                <option value="Norman">Norman (Thursdays)</option>
+                <option value="HC">HC — Health Campus (Tuesdays)</option>
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle}>Address</label>
+              <input value={locForm.address} onChange={function(e){ setLocForm(function(f){ return {...f,address:e.target.value}; }); }}
+                placeholder="e.g. 660 Parrington Oval, Norman, OK 73019" style={inputStyle}/>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <button onClick={function(){ setLocForm({name:"",address:"",campus:"",_open:false}); setLocEdit(null); }}
+              style={{background:"#0f172a",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"8px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Cancel</button>
+            <button onClick={function(){ saveLoc(); setLocForm({name:"",address:"",campus:"",_open:false}); }}
+              style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"8px 22px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>{locEdit?"Update Location":"Add Location"}</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Requestor modal ── */}
+      {(reqForm._open) && (
+        <div style={{position:"fixed",top:"50%",left:"50%",transform:"translate(-50%,-50%)",zIndex:1000,background:"#1e293b",borderRadius:14,border:"1px solid #334155",padding:"28px 32px",width:"min(560px,92vw)",boxShadow:"0 24px 60px rgba(0,0,0,0.5)"}}>
+          <div style={{fontFamily:"'Geist',sans-serif",fontWeight:700,fontSize:16,color:"#f1f5f9",marginBottom:20}}>{reqEdit?"Edit Requestor":"Add Requestor"}</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
+            <div>
+              <label style={labelStyle}>Name *</label>
+              <input value={reqForm.name} onChange={function(e){ setReqForm(function(f){ return {...f,name:e.target.value}; }); }}
+                placeholder="e.g. Jane Smith" style={inputStyle} autoFocus/>
+            </div>
+            <div>
+              <label style={labelStyle}>Email</label>
+              <input value={reqForm.email} onChange={function(e){ setReqForm(function(f){ return {...f,email:e.target.value}; }); }}
+                placeholder="requestor@ou.edu" style={inputStyle}/>
+            </div>
+            <div>
+              <label style={labelStyle}>Phone</label>
+              <input value={reqForm.phone} onChange={function(e){
+                var digits = e.target.value.replace(/\D/g,"").slice(0,10);
+                var fmt = digits;
+                if(digits.length>=7) fmt="("+digits.slice(0,3)+") "+digits.slice(3,6)+"-"+digits.slice(6);
+                else if(digits.length>=4) fmt="("+digits.slice(0,3)+") "+digits.slice(3);
+                else if(digits.length>0) fmt="("+digits;
+                setReqForm(function(f){ return {...f,phone:fmt}; });
+              }} placeholder="(555) 555-5555" style={inputStyle}/>
+            </div>
+            <div>
+              <label style={labelStyle}>Department</label>
+              <input value={reqForm.department||""} onChange={function(e){ setReqForm(function(f){ return {...f,department:e.target.value}; }); }}
+                placeholder="e.g. Biochemistry" style={inputStyle}/>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <button onClick={function(){ setReqForm({name:"",email:"",phone:"",department:"",_open:false}); setReqEdit(null); }}
+              style={{background:"#0f172a",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"8px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Cancel</button>
+            <button onClick={function(){ saveReq(); setReqForm({name:"",email:"",phone:"",department:"",_open:false}); }}
+              style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"8px 22px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>{reqEdit?"Update Requestor":"Add Requestor"}</button>
+          </div>
+        </div>
+      )}
+
       {/* ── Locations section ── */}
       {section==="locations" && (
         <div>
-          {/* Add / edit form */}
-          <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px",marginBottom:20}}>
-            <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:14}}>{locEdit?"Edit Location":"Add Location"}</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 2fr",gap:14,marginBottom:14}}>
-              <div>
-                <label style={labelStyle}>Location Name *</label>
-                <input value={locForm.name} onChange={function(e){ setLocForm(function(f){ return {...f,name:e.target.value}; }); }}
-                  placeholder="e.g. Main Campus Bldg A" style={inputStyle}/>
-              </div>
-              <div>
-                <label style={labelStyle}>Campus</label>
-                <select value={locForm.campus||""} onChange={function(e){ setLocForm(function(f){ return {...f,campus:e.target.value}; }); }} style={inputStyle}>
-                  <option value="">— None —</option>
-                  <option value="Norman">Norman (Thursdays)</option>
-                  <option value="HC">HC — Health Campus (Tuesdays)</option>
-                </select>
-              </div>
-              <div>
-                <label style={labelStyle}>Address</label>
-                <input value={locForm.address} onChange={function(e){ setLocForm(function(f){ return {...f,address:e.target.value}; }); }}
-                  placeholder="e.g. 660 Parrington Oval, Norman, OK 73019" style={inputStyle}/>
-              </div>
-            </div>
-            <div style={{display:"flex",gap:8}}>
-              {!readOnly && <button onClick={saveLoc} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"8px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>{locEdit?"Update Location":"Add Location"}</button>}
-          {readOnly && <span style={{fontSize:12,color:"#475569"}}>Sign in to make changes</span>}
-              {locEdit && <button onClick={function(){ setLocEdit(null); setLocForm({name:"",address:""}); }} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"8px 16px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Cancel</button>}
-            </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+            <span style={{fontSize:13,color:"#64748b"}}>{locations.length} location{locations.length!==1?"s":""}</span>
+            {!readOnly && (
+              <button onClick={function(){ setLocEdit(null); setLocForm({name:"",address:"",campus:"",_open:true}); }}
+                style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"8px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>+ Add Location</button>
+            )}
+            {readOnly && <span style={{fontSize:12,color:"#475569"}}>Sign in to make changes</span>}
           </div>
-
-          {/* Locations list */}
           {locations.length===0 ? (
             <div style={{textAlign:"center",padding:"40px 20px",border:"1px dashed #334155",borderRadius:12,color:"#475569"}}>
               <div style={{fontSize:32,marginBottom:8}}>📍</div>
-              <div style={{fontSize:13}}>No locations yet. Add one above.</div>
+              <div style={{fontSize:13}}>No locations yet. Click Add Location to get started.</div>
             </div>
           ) : (
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -936,8 +997,10 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
                       {l.address && <div style={{fontSize:11,color:"#64748b",marginTop:3}}>📍 {l.address}</div>}
                       {!l.address && <div style={{fontSize:11,color:"#334155",marginTop:3}}>No address set</div>}
                     </div>
-                    <button onClick={function(){ editLoc(l); }} style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:6,padding:"5px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>Edit</button>
-                    <button onClick={function(){ delLoc(l.id); }} style={{background:"#0f172a",color:"#ef4444",border:"1px solid #450a0a",borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:12}}>✕</button>
+                    {!readOnly && <button onClick={function(){ editLoc(l); setLocForm(function(f){ return {...f,_open:true}; }); }}
+                      style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:6,padding:"5px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>Edit</button>}
+                    {!readOnly && <button onClick={function(){ delLoc(l.id); }}
+                      style={{background:"#0f172a",color:"#ef4444",border:"1px solid #450a0a",borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:12}}>✕</button>}
                   </div>
                 );
               })}
@@ -949,49 +1012,18 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
       {/* ── Requestors section ── */}
       {section==="requestors" && (
         <div>
-          {/* Add / edit form */}
-          <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px",marginBottom:20}}>
-            <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:14}}>{reqEdit?"Edit Requestor":"Add Requestor"}</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:14,marginBottom:14}}>
-              <div>
-                <label style={labelStyle}>Name *</label>
-                <input value={reqForm.name} onChange={function(e){ setReqForm(function(f){ return {...f,name:e.target.value}; }); }}
-                  placeholder="e.g. Jane Smith" style={inputStyle}/>
-              </div>
-              <div>
-                <label style={labelStyle}>Email</label>
-                <input value={reqForm.email} onChange={function(e){ setReqForm(function(f){ return {...f,email:e.target.value}; }); }}
-                  placeholder="requestor@ou.edu" style={inputStyle}/>
-              </div>
-              <div>
-                <label style={labelStyle}>Phone</label>
-                <input value={reqForm.phone} onChange={function(e){
-                  var digits = e.target.value.replace(/\D/g,"").slice(0,10);
-                  var fmt = digits;
-                  if(digits.length>=7) fmt="("+digits.slice(0,3)+") "+digits.slice(3,6)+"-"+digits.slice(6);
-                  else if(digits.length>=4) fmt="("+digits.slice(0,3)+") "+digits.slice(3);
-                  else if(digits.length>0) fmt="("+digits;
-                  setReqForm(function(f){ return {...f,phone:fmt}; });
-                }} placeholder="(555) 555-5555" style={inputStyle}/>
-              </div>
-              <div>
-                <label style={labelStyle}>Department</label>
-                <input value={reqForm.department||""} onChange={function(e){ setReqForm(function(f){ return {...f,department:e.target.value}; }); }}
-                  placeholder="e.g. Biochemistry" style={inputStyle}/>
-              </div>
-            </div>
-            <div style={{display:"flex",gap:8}}>
-              {!readOnly && <button onClick={saveReq} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"8px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>{reqEdit?"Update Requestor":"Add Requestor"}</button>}
-          {readOnly && <span style={{fontSize:12,color:"#475569"}}>Sign in to make changes</span>}
-              {reqEdit && <button onClick={function(){ setReqEdit(null); setReqForm({name:"",email:"",phone:""}); }} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"8px 16px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Cancel</button>}
-            </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+            <span style={{fontSize:13,color:"#64748b"}}>{requestors.length} requestor{requestors.length!==1?"s":""}</span>
+            {!readOnly && (
+              <button onClick={function(){ setReqEdit(null); setReqForm({name:"",email:"",phone:"",department:"",_open:true}); }}
+                style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"8px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>+ Add Requestor</button>
+            )}
+            {readOnly && <span style={{fontSize:12,color:"#475569"}}>Sign in to make changes</span>}
           </div>
-
-          {/* Requestors list */}
           {requestors.length===0 ? (
             <div style={{textAlign:"center",padding:"40px 20px",border:"1px dashed #334155",borderRadius:12,color:"#475569"}}>
               <div style={{fontSize:32,marginBottom:8}}>✉</div>
-              <div style={{fontSize:13}}>No requestors yet. Add one above.</div>
+              <div style={{fontSize:13}}>No requestors yet. Click Add Requestor to get started.</div>
             </div>
           ) : (
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -1006,8 +1038,10 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
                         {r.phone && <span>📞 {r.phone}</span>}
                       </div>
                     </div>
-                    <button onClick={function(){ editReq(r); }} style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:6,padding:"5px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>Edit</button>
-                    <button onClick={function(){ delReq(r.id); }} style={{background:"#0f172a",color:"#ef4444",border:"1px solid #450a0a",borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:12}}>✕</button>
+                    {!readOnly && <button onClick={function(){ editReq(r); setReqForm(function(f){ return {...f,_open:true}; }); }}
+                      style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:6,padding:"5px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>Edit</button>}
+                    {!readOnly && <button onClick={function(){ delReq(r.id); }}
+                      style={{background:"#0f172a",color:"#ef4444",border:"1px solid #450a0a",borderRadius:6,padding:"5px 10px",cursor:"pointer",fontSize:12}}>✕</button>}
                   </div>
                 );
               })}
@@ -2477,9 +2511,9 @@ function PickupScanTab({tickets, setTickets, locations, readOnly}){
         return loc && loc.address ? loc.address : (t.site||"");
       }).filter(Boolean);
       if(addrs.length < 2) return null;
-      var origin = addrs[0];
+      var origin = "800 NE 15th St, Oklahoma City, OK 73104";
       var dest   = addrs[addrs.length-1];
-      var waypts = addrs.slice(1, addrs.length-1);
+      var waypts = addrs.slice(0, addrs.length-1); // all stops are waypoints since origin is fixed
       if(GMAPS_API_KEY){
         var base = "https://www.google.com/maps/embed/v1/directions?key="+GMAPS_API_KEY;
         base += "&origin="+encodeURIComponent(origin)+"&destination="+encodeURIComponent(dest);
