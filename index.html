@@ -536,7 +536,7 @@ function App(){
   const [fbLoading, setFbLoading]   = useState(true);   // initial Firestore load
   const jsonRef         = useRef();
   const saveTimer       = useRef(null);
-  const pendingSession  = useRef(null); // stores session data waiting to be pushed
+  const [pendingSession, setPendingSession] = useState(null); // session waiting to push
 
   // ── Firebase Auth ─────────────────────────────────────────────
   useEffect(function(){
@@ -699,7 +699,7 @@ function App(){
     setRequestors(s.requestors||[]);
     setImportMsg({ok:true, text:"Pushed "+(s.tickets||[]).length+" tickets to Firestore."});
     setTimeout(function(){ setImportMsg(null); }, 6000);
-    pendingSession.current = null;
+    setPendingSession(null);
   }
 
   function handleLegacyLoad(e){
@@ -709,7 +709,7 @@ function App(){
       try {
         const s = JSON.parse(evt.target.result);
         if(!s.tickets) throw new Error();
-        pendingSession.current = s;
+        setPendingSession(s);
         setVendorReport(null);
         if(userRef.current){
           pushToFirestore(s);
@@ -751,6 +751,11 @@ function App(){
                     <span style={{width:8,height:8,borderRadius:"50%",background:"#86efac",display:"inline-block"}}/>
                     {user.displayName||user.email}
                   </div>
+                  <button onClick={function(){
+                    db.collection("_test").doc("ping").set({ts:new Date().toISOString(), uid:user.uid})
+                      .then(function(){ alert("Firestore write SUCCESS! Database is connected."); })
+                      .catch(function(e){ alert("Firestore write FAILED: "+e.message+"\n\nCheck your security rules — make sure your email matches exactly."); });
+                  }} style={{background:"none",color:"#64748b",border:"1px solid #334155",borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>Test DB</button>
                   <button onClick={signOut} style={{background:"none",color:"#64748b",border:"1px solid #334155",borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>Sign out</button>
                 </div>
               ) : (
@@ -760,8 +765,8 @@ function App(){
               )}
               {fbLoading && <span style={{fontSize:11,color:"#475569"}}>Loading…</span>}
               {!fbLoading && !user && <span style={{fontSize:11,color:"#64748b"}}>👁 Read-only</span>}
-              {user && pendingSession.current && (
-                <button onClick={function(){ pushToFirestore(pendingSession.current); }}
+              {user && pendingSession && (
+                <button onClick={function(){ pushToFirestore(pendingSession); }}
                   style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500,animation:"pulse 1s infinite"}}>
                   ☁ Push to Firestore
                 </button>
