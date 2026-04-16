@@ -848,25 +848,20 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, onClo
         </div>
         <div style={{display:"flex",gap:8}}>
           <button onClick={function(){
-            var locJs = "var LOCATIONS = [
-" + (locations||[]).map(function(l){
-              return '  { name: '+JSON.stringify(l.name)+', address: '+JSON.stringify(l.address||'')+', campus: '+JSON.stringify(l.campus||'')+' }';
-            }).join(',
-') + "
-];";
-            var reqJs = "
-var REQUESTORS = [
-" + (requestors||[]).map(function(r){
-              return '  { name: '+JSON.stringify(r.name)+', email: '+JSON.stringify(r.email||'')+', phone: '+JSON.stringify(r.phone||'')+', department: '+JSON.stringify(r.department||'')+' }';
-            }).join(',
-') + "
-];";
-            var full = locJs + "
-" + reqJs;
+            var nl = "\n";
+            var locLines = (locations||[]).map(function(l){
+              return "  { name: "+JSON.stringify(l.name)+", address: "+JSON.stringify(l.address||"")+", campus: "+JSON.stringify(l.campus||"")+" }";
+            }).join(","+nl);
+            var locJs = "var LOCATIONS = ["+nl+locLines+nl+"];";
+            var reqLines = (requestors||[]).map(function(r){
+              return "  { name: "+JSON.stringify(r.name)+", email: "+JSON.stringify(r.email||"")+", phone: "+JSON.stringify(r.phone||"")+", department: "+JSON.stringify(r.department||"")+" }";
+            }).join(","+nl);
+            var reqJs = "var REQUESTORS = ["+nl+reqLines+nl+"];";
+            var full = locJs+nl+nl+reqJs;
             navigator.clipboard.writeText(full).then(function(){
-              alert("Config copied to clipboard!\n\nPaste it into the <script> config block at the top of DisposalRequest.html, replacing the existing LOCATIONS and REQUESTORS arrays.");
+              alert("Config copied!\n\nPaste into the config block at the top of DisposalRequest index.html, replacing the LOCATIONS and REQUESTORS arrays.");
             }).catch(function(){
-              prompt("Copy this config and paste into DisposalRequest.html:", full);
+              prompt("Copy this and paste into DisposalRequest index.html:", full);
             });
           }} style={{background:"linear-gradient(135deg,#4f46e5,#7c3aed)",color:"#fff",border:"none",borderRadius:8,padding:"9px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>📋 Copy Form Config</button>
           <button onClick={onClose} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"9px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>← Back to App</button>
