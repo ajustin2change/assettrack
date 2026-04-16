@@ -1043,7 +1043,6 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, onClo
             <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:6}}>Download Snapshot</div>
             <div style={{fontSize:12,color:"#64748b",marginBottom:16}}>Download a full JSON snapshot of all data as a local backup. Does not affect the live database.</div>
             <button onClick={function(){
-              var payload = {version:5, exportedAt:new Date().toLocaleString(), tickets:locations, shipments:shipments, locations:locations, requestors:requestors};
               var blob = new Blob([JSON.stringify({version:5,exportedAt:new Date().toLocaleString(),tickets:tickets,shipments:shipments,locations:locations,requestors:requestors},null,2)],{type:"application/json"});
               var url = URL.createObjectURL(blob);
               var a = document.createElement("a"); a.href=url; a.download="AssetTrack-Snapshot-"+new Date().toISOString().slice(0,10)+".json"; a.click(); URL.revokeObjectURL(url);
