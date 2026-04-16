@@ -1022,29 +1022,248 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
 
       {/* ── Data Management section ── */}
       {section==="data" && (
-        <div>
-          <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px",marginBottom:20}}>
-            <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:6}}>Download Snapshot</div>
-            <div style={{fontSize:12,color:"#64748b",marginBottom:16}}>Download a full JSON snapshot of all data as a local backup. Does not affect the live database.</div>
-            <button onClick={function(){
-              var blob = new Blob([JSON.stringify({version:5,exportedAt:new Date().toLocaleString(),tickets:tickets,shipments:shipments,locations:locations,requestors:requestors},null,2)],{type:"application/json"});
-              var url = URL.createObjectURL(blob);
-              var a = document.createElement("a"); a.href=url; a.download="AssetTrack-Snapshot-"+new Date().toISOString().slice(0,10)+".json"; a.click(); URL.revokeObjectURL(url);
-            }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"9px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>⬇ Download Snapshot</button>
-          </div>
-          <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px"}}>
-            <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:12}}>Database Stats</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
-              {[{label:"Tickets",value:tickets.length,color:"#93c5fd"},{label:"Shipments",value:shipments.length,color:"#86efac"},{label:"Locations",value:locations.length,color:"#fde047"},{label:"Requestors",value:requestors.length,color:"#c4b5fd"}].map(function(s){
-                return (
-                  <div key={s.label} style={{background:"#0f172a",borderRadius:8,padding:"14px 16px",textAlign:"center"}}>
-                    <div style={{fontSize:24,fontWeight:700,color:s.color}}>{s.value}</div>
-                    <div style={{fontSize:11,color:"#64748b",marginTop:4}}>{s.label}</div>
-                  </div>
-                );
-              })}
+        <DataManagementSection
+          tickets={tickets} shipments={shipments}
+          locations={locations} setLocations={setLocations}
+          requestors={requestors} setRequestors={setRequestors}
+          readOnly={readOnly}
+        />
+      )}
+    </div>
+  );
+}
+
+
+function DataManagementSection({tickets, shipments, locations, setLocations, requestors, setRequestors, readOnly}){
+  const [showImport, setShowImport]     = useState(false);
+  const [importMsg,  setImportMsg]      = useState(null);
+  const [preview,    setPreview]        = useState(null); // {locations:[], requestors:[]}
+  const locFileRef  = React.useRef();
+  const reqFileRef  = React.useRef();
+
+  function flashMsg(ok, text){ setImportMsg({ok,text}); setTimeout(function(){ setImportMsg(null); }, 6000); }
+
+  function parseLocFile(e){
+    var file = e.target.files[0]; e.target.value=""; if(!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev){
+      try {
+        var wb = XLSX.read(ev.target.result, {type:"array"});
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        var rows = XLSX.utils.sheet_to_json(ws, {defval:""});
+        // Auto-detect columns — look for name/location, campus
+        var sample = rows[0] ? Object.keys(rows[0]) : [];
+        function findCol(keys){ return sample.find(function(k){ return keys.some(function(kw){ return k.toLowerCase().includes(kw); }); })||""; }
+        var nameCol   = findCol(["location","building","site","name"]);
+        var campusCol = findCol(["campus"]);
+        var addressCol= findCol(["address"]);
+        if(!nameCol){ flashMsg(false,"Could not find a Location/Name column. Expected a column named 'Location', 'Building', 'Site', or 'Name'."); return; }
+
+        var seen = new Set();
+        var locs = [];
+        rows.forEach(function(r){
+          var name = String(r[nameCol]||"").trim();
+          if(!name || seen.has(name.toLowerCase())) return;
+          seen.add(name.toLowerCase());
+          locs.push({ id:uid(), name:name, campus:(campusCol?String(r[campusCol]||"").trim():""), address:(addressCol?String(r[addressCol]||"").trim():"") });
+        });
+        setPreview(function(prev){ return {...(prev||{}), locations:locs}; });
+        flashMsg(true, locs.length+" unique locations detected — review below then click Import.");
+      } catch(err){ flashMsg(false,"Could not read file: "+err.message); }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function parseReqFile(e){
+    var file = e.target.files[0]; e.target.value=""; if(!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev){
+      try {
+        var wb = XLSX.read(ev.target.result, {type:"array"});
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        var rows = XLSX.utils.sheet_to_json(ws, {defval:""});
+        var sample = rows[0] ? Object.keys(rows[0]) : [];
+        function findCol(keys){ return sample.find(function(k){ return keys.some(function(kw){ return k.toLowerCase().includes(kw); }); })||""; }
+        var nameCol  = findCol(["name","requestor","contact","person"]);
+        var emailCol = findCol(["email","mail"]);
+        var phoneCol = findCol(["phone","tel","mobile","cell"]);
+        var deptCol  = findCol(["department","dept","division","unit"]);
+        if(!nameCol && !emailCol){ flashMsg(false,"Could not find a Name or Email column."); return; }
+
+        var seenEmail = new Set();
+        var seenName  = new Set();
+        var reqs = [];
+        rows.forEach(function(r){
+          var name  = String(r[nameCol]||"").trim();
+          var email = String(r[emailCol]||"").trim().toLowerCase();
+          if(!name && !email) return;
+          // Deduplicate by email first, then by name
+          var key = email || name.toLowerCase();
+          if(seenEmail.has(key)) return;
+          seenEmail.add(key);
+          if(name && seenName.has(name.toLowerCase())) return;
+          if(name) seenName.add(name.toLowerCase());
+
+          var rawPhone = String(r[phoneCol]||"").replace(/\D/g,"").slice(0,10);
+          var fmt = rawPhone;
+          if(rawPhone.length>=7) fmt="("+rawPhone.slice(0,3)+") "+rawPhone.slice(3,6)+"-"+rawPhone.slice(6);
+          else if(rawPhone.length>=4) fmt="("+rawPhone.slice(0,3)+") "+rawPhone.slice(3);
+          else if(rawPhone.length>0) fmt="("+rawPhone;
+          reqs.push({ id:uid(), name:name, email:email, phone:fmt||"", department:(deptCol?String(r[deptCol]||"").trim():"") });
+        });
+        setPreview(function(prev){ return {...(prev||{}), requestors:reqs}; });
+        flashMsg(true, reqs.length+" unique requestors detected — review below then click Import.");
+      } catch(err){ flashMsg(false,"Could not read file: "+err.message); }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function doImportLocations(){
+    if(!preview||!preview.locations||!preview.locations.length) return;
+    if(!confirm("This will REPLACE all "+locations.length+" existing locations with "+preview.locations.length+" new ones. Continue?")) return;
+    setLocations(preview.locations);
+    setPreview(function(p){ return {...p, locations:null}; });
+    flashMsg(true, "Imported "+preview.locations.length+" locations.");
+  }
+
+  function doImportRequestors(){
+    if(!preview||!preview.requestors||!preview.requestors.length) return;
+    if(!confirm("This will REPLACE all "+requestors.length+" existing requestors with "+preview.requestors.length+" new ones. Continue?")) return;
+    setRequestors(preview.requestors);
+    setPreview(function(p){ return {...p, requestors:null}; });
+    flashMsg(true, "Imported "+preview.requestors.length+" requestors.");
+  }
+
+  var cardStyle = {background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px",marginBottom:16};
+  var labelStyle = {display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6};
+
+  return (
+    <div>
+      {/* Download Snapshot */}
+      <div style={cardStyle}>
+        <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:6}}>Download Snapshot</div>
+        <div style={{fontSize:12,color:"#64748b",marginBottom:14}}>Download a full JSON backup of all data. Does not affect the live database.</div>
+        <button onClick={function(){
+          var blob = new Blob([JSON.stringify({version:5,exportedAt:new Date().toLocaleString(),tickets:tickets,shipments:shipments,locations:locations,requestors:requestors},null,2)],{type:"application/json"});
+          var url = URL.createObjectURL(blob); var a = document.createElement("a");
+          a.href=url; a.download="AssetTrack-Snapshot-"+new Date().toISOString().slice(0,10)+".json"; a.click(); URL.revokeObjectURL(url);
+        }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"9px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>⬇ Download Snapshot</button>
+      </div>
+
+      {/* Database Stats */}
+      <div style={cardStyle}>
+        <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:12}}>Database Stats</div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+          {[{label:"Tickets",value:tickets.length,color:"#93c5fd"},{label:"Shipments",value:shipments.length,color:"#86efac"},{label:"Locations",value:locations.length,color:"#fde047"},{label:"Requestors",value:requestors.length,color:"#c4b5fd"}].map(function(s){
+            return (
+              <div key={s.label} style={{background:"#0f172a",borderRadius:8,padding:"14px 16px",textAlign:"center"}}>
+                <div style={{fontSize:24,fontWeight:700,color:s.color}}>{s.value}</div>
+                <div style={{fontSize:11,color:"#64748b",marginTop:4}}>{s.label}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* One-time Import Tool */}
+      {!readOnly && (
+        <div style={cardStyle}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:showImport?14:0}}>
+            <div>
+              <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0"}}>One-time Spreadsheet Import</div>
+              <div style={{fontSize:12,color:"#64748b",marginTop:2}}>Import locations and requestors from Excel files. Hide when done.</div>
             </div>
+            <button onClick={function(){ setShowImport(function(v){ return !v; }); }}
+              style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:7,padding:"6px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>
+              {showImport?"Hide ▲":"Show ▼"}
+            </button>
           </div>
+
+          {showImport && (
+            <div>
+              {importMsg && (
+                <div style={{marginBottom:14,padding:"10px 14px",borderRadius:8,fontSize:12,background:importMsg.ok?"#052e16":"#450a0a",color:importMsg.ok?"#86efac":"#fca5a5",border:"1px solid "+(importMsg.ok?"#166534":"#7f1d1d")}}>
+                  {importMsg.ok?"✓ ":"✗ "}{importMsg.text}
+                </div>
+              )}
+
+              {/* Locations import */}
+              <div style={{background:"#0f172a",borderRadius:10,border:"1px solid #334155",padding:"16px 18px",marginBottom:12}}>
+                <div style={{fontWeight:600,fontSize:13,color:"#e2e8f0",marginBottom:8}}>📍 Import Locations</div>
+                <div style={{fontSize:12,color:"#64748b",marginBottom:10}}>Upload a spreadsheet with columns for Location name and Campus. Column names are auto-detected.</div>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  <input ref={locFileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={parseLocFile}/>
+                  <button onClick={function(){ locFileRef.current&&locFileRef.current.click(); }}
+                    style={{background:"#1e293b",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>📂 Choose File</button>
+                  {preview&&preview.locations&&preview.locations.length>0 && (
+                    <button onClick={doImportLocations}
+                      style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>
+                      ✓ Import {preview.locations.length} Locations
+                    </button>
+                  )}
+                </div>
+                {preview&&preview.locations&&preview.locations.length>0 && (
+                  <div style={{marginTop:12,maxHeight:180,overflowY:"auto",border:"1px solid #1e293b",borderRadius:6}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                      <thead><tr style={{borderBottom:"1px solid #1e293b",background:"#1e293b"}}>
+                        <th style={{padding:"6px 10px",textAlign:"left",color:"#64748b",fontWeight:500}}>Name</th>
+                        <th style={{padding:"6px 10px",textAlign:"left",color:"#64748b",fontWeight:500}}>Campus</th>
+                        <th style={{padding:"6px 10px",textAlign:"left",color:"#64748b",fontWeight:500}}>Address</th>
+                      </tr></thead>
+                      <tbody>
+                        {preview.locations.map(function(l,i){
+                          return <tr key={i} style={{borderBottom:"1px solid #0f172a"}}>
+                            <td style={{padding:"5px 10px",color:"#f1f5f9"}}>{l.name}</td>
+                            <td style={{padding:"5px 10px",color:l.campus==="HC"?"#fb923c":l.campus==="Norman"?"#86efac":"#64748b"}}>{l.campus||"—"}</td>
+                            <td style={{padding:"5px 10px",color:"#64748b"}}>{l.address||"—"}</td>
+                          </tr>;
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Requestors import */}
+              <div style={{background:"#0f172a",borderRadius:10,border:"1px solid #334155",padding:"16px 18px"}}>
+                <div style={{fontWeight:600,fontSize:13,color:"#e2e8f0",marginBottom:8}}>✉ Import Requestors</div>
+                <div style={{fontSize:12,color:"#64748b",marginBottom:10}}>Upload a spreadsheet with columns for Name, Email, Phone, and optionally Department. Column names are auto-detected. Duplicates (by email or name) are skipped.</div>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                  <input ref={reqFileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={parseReqFile}/>
+                  <button onClick={function(){ reqFileRef.current&&reqFileRef.current.click(); }}
+                    style={{background:"#1e293b",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>📂 Choose File</button>
+                  {preview&&preview.requestors&&preview.requestors.length>0 && (
+                    <button onClick={doImportRequestors}
+                      style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>
+                      ✓ Import {preview.requestors.length} Requestors
+                    </button>
+                  )}
+                </div>
+                {preview&&preview.requestors&&preview.requestors.length>0 && (
+                  <div style={{marginTop:12,maxHeight:180,overflowY:"auto",border:"1px solid #1e293b",borderRadius:6}}>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                      <thead><tr style={{borderBottom:"1px solid #1e293b",background:"#1e293b"}}>
+                        <th style={{padding:"6px 10px",textAlign:"left",color:"#64748b",fontWeight:500}}>Name</th>
+                        <th style={{padding:"6px 10px",textAlign:"left",color:"#64748b",fontWeight:500}}>Email</th>
+                        <th style={{padding:"6px 10px",textAlign:"left",color:"#64748b",fontWeight:500}}>Phone</th>
+                        <th style={{padding:"6px 10px",textAlign:"left",color:"#64748b",fontWeight:500}}>Dept</th>
+                      </tr></thead>
+                      <tbody>
+                        {preview.requestors.map(function(r,i){
+                          return <tr key={i} style={{borderBottom:"1px solid #0f172a"}}>
+                            <td style={{padding:"5px 10px",color:"#f1f5f9"}}>{r.name||"—"}</td>
+                            <td style={{padding:"5px 10px",color:"#94a3b8"}}>{r.email||"—"}</td>
+                            <td style={{padding:"5px 10px",color:"#94a3b8"}}>{r.phone||"—"}</td>
+                            <td style={{padding:"5px 10px",color:"#64748b"}}>{r.department||"—"}</td>
+                          </tr>;
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
