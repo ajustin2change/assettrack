@@ -1445,7 +1445,15 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
         // Sort
         filtered = filtered.slice().sort(function(a,b){
           var dir = sortDir==="asc" ? 1 : -1;
-          if(sortBy==="ticketNo") return dir * String(a.ticketNo).localeCompare(String(b.ticketNo), undefined, {numeric:true});
+          if(sortBy==="ticketNo"){
+            var aNo = (a.ticketNo||"").trim();
+            var bNo = (b.ticketNo||"").trim();
+            // Empty ticket numbers always sort to top (most recent / highest priority)
+            if(!aNo && !bNo) return 0;
+            if(!aNo) return -1; // a has no number — goes first
+            if(!bNo) return 1;  // b has no number — goes first
+            return dir * String(aNo).localeCompare(String(bNo), undefined, {numeric:true});
+          }
           if(sortBy==="requestor") return dir * (a.requestor||"").localeCompare(b.requestor||"");
           if(sortBy==="assets") return dir * ((a.expectedAssets||[]).length - (b.expectedAssets||[]).length);
           if(sortBy==="date") return dir * (a.date||"").localeCompare(b.date||"");
