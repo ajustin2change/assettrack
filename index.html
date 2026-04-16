@@ -751,14 +751,7 @@ function App(){
                     <span style={{width:8,height:8,borderRadius:"50%",background:"#86efac",display:"inline-block"}}/>
                     {user.displayName||user.email}
                   </div>
-                  <button onClick={function(){
-                    if(!confirm("Push all "+tickets.length+" tickets, "+shipments.length+" shipments, "+locations.length+" locations, and "+requestors.length+" requestors to Firestore?")) return;
-                    tickets.forEach(function(t){ fbSet("tickets", t.id, t); });
-                    shipments.forEach(function(s){ fbSet("shipments", s.id, s); });
-                    locations.forEach(function(l){ fbSet("locations", l.id, l); });
-                    requestors.forEach(function(r){ fbSet("requestors", r.id, r); });
-                    alert("Sync started — check Firestore in a few seconds.");
-                  }} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:500}}>☁ Sync to Firestore</button>
+
                   <button onClick={signOut} style={{background:"none",color:"#64748b",border:"1px solid #334155",borderRadius:7,padding:"5px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>Sign out</button>
                 </div>
               ) : (
