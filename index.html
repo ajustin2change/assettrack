@@ -534,8 +534,9 @@ function App(){
   const [user, setUser]             = useState(null);   // Firebase auth user
   const userRef                     = React.useRef(null); // always-current user for closures
   const [fbLoading, setFbLoading]   = useState(true);   // initial Firestore load
-  const jsonRef      = useRef();
-  const saveTimer    = useRef(null);
+  const jsonRef         = useRef();
+  const saveTimer       = useRef(null);
+  const pendingSession  = useRef(null); // stores session data waiting to be pushed
 
   // ── Firebase Auth ─────────────────────────────────────────────
   useEffect(function(){
@@ -680,6 +681,27 @@ function App(){
     }
   }
 
+  function pushToFirestore(s){
+    if(!userRef.current){
+      setImportMsg({ok:false, text:"Not signed in — sign in first, then try pushing again."});
+      setTimeout(function(){ setImportMsg(null); }, 5000);
+      return;
+    }
+    // Write directly via fbSet bypassing the diff logic
+    (s.tickets||[]).forEach(function(t){ fbSet("tickets", t.id, t); });
+    (s.shipments||[]).forEach(function(sh){ fbSet("shipments", sh.id, sh); });
+    (s.locations||[]).forEach(function(l){ fbSet("locations", l.id, l); });
+    (s.requestors||[]).forEach(function(r){ fbSet("requestors", r.id, r); });
+    // Also update local state
+    setTickets(s.tickets||[]);
+    setShipments(s.shipments||[]);
+    setLocations(s.locations||[]);
+    setRequestors(s.requestors||[]);
+    setImportMsg({ok:true, text:"Pushed "+(s.tickets||[]).length+" tickets to Firestore."});
+    setTimeout(function(){ setImportMsg(null); }, 6000);
+    pendingSession.current = null;
+  }
+
   function handleLegacyLoad(e){
     const file = e.target.files[0]; if(!file) return;
     const reader = new FileReader();
@@ -687,8 +709,15 @@ function App(){
       try {
         const s = JSON.parse(evt.target.result);
         if(!s.tickets) throw new Error();
-        saveTickets(s.tickets||[]); saveShipments(s.shipments||[]); saveLocations(s.locations||[]); saveRequestors(s.requestors||[]); setVendorReport(null);
-        setImportMsg({ok:true, text:"Loaded "+s.tickets.length+" ticket(s) from \""+file.name+"\" — writing to Firestore…"});
+        pendingSession.current = s;
+        setVendorReport(null);
+        if(userRef.current){
+          pushToFirestore(s);
+        } else {
+          // Load into local state only — show push button
+          setTickets(s.tickets||[]); setShipments(s.shipments||[]); setLocations(s.locations||[]); setRequestors(s.requestors||[]);
+          setImportMsg({ok:true, text:"Loaded "+s.tickets.length+" ticket(s). Sign in then click \"Push to Firestore\" to save."});
+        }
       } catch(err){
         setImportMsg({ok:false, text:"Invalid session file."});
       }
@@ -731,6 +760,12 @@ function App(){
               )}
               {fbLoading && <span style={{fontSize:11,color:"#475569"}}>Loading…</span>}
               {!fbLoading && !user && <span style={{fontSize:11,color:"#64748b"}}>👁 Read-only</span>}
+              {user && pendingSession.current && (
+                <button onClick={function(){ pushToFirestore(pendingSession.current); }}
+                  style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500,animation:"pulse 1s infinite"}}>
+                  ☁ Push to Firestore
+                </button>
+              )}
               <input ref={jsonRef} type="file" accept=".json" style={{display:"none"}} onChange={handleLegacyLoad}/>
               {FSA_SUPPORTED ? (
                 <React.Fragment>
