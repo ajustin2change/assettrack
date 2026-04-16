@@ -532,13 +532,14 @@ function App(){
   const [fileHandle, setFileHandle] = useState(null);
   const [saveStatus, setSaveStatus] = useState("idle");
   const [user, setUser]             = useState(null);   // Firebase auth user
+  const userRef                     = React.useRef(null); // always-current user for closures
   const [fbLoading, setFbLoading]   = useState(true);   // initial Firestore load
   const jsonRef      = useRef();
   const saveTimer    = useRef(null);
 
   // ── Firebase Auth ─────────────────────────────────────────────
   useEffect(function(){
-    var unsub = auth.onAuthStateChanged(function(u){ setUser(u); });
+    var unsub = auth.onAuthStateChanged(function(u){ setUser(u); userRef.current = u; });
     return unsub;
   }, []);
 
@@ -567,20 +568,20 @@ function App(){
 
   // ── Firestore write helpers ───────────────────────────────────
   function fbSet(collection, id, data){
-    if(!user) return;
-    var clean = JSON.parse(JSON.stringify(data)); // strip undefined
-    db.collection(collection).doc(id).set(clean);
+    if(!userRef.current) { console.warn("fbSet skipped — not signed in"); return; }
+    var clean = JSON.parse(JSON.stringify(data));
+    db.collection(collection).doc(id).set(clean).catch(function(e){ console.error("Firestore write error:", e); });
   }
   function fbDelete(collection, id){
-    if(!user) return;
-    db.collection(collection).doc(id).delete();
+    if(!userRef.current) return;
+    db.collection(collection).doc(id).delete().catch(function(e){ console.error("Firestore delete error:", e); });
   }
 
   // Wrap setTickets/setShipments/setLocations/setRequestors to also write Firestore
   function saveTickets(updaterOrArray){
     setTickets(function(prev){
       var next = typeof updaterOrArray === "function" ? updaterOrArray(prev) : updaterOrArray;
-      if(!user) return next;
+      if(!userRef.current) return next;
       // Diff and write changed/added items
       next.forEach(function(t){
         var old = prev.find(function(x){ return x.id===t.id; });
@@ -595,7 +596,7 @@ function App(){
   function saveShipments(updaterOrArray){
     setShipments(function(prev){
       var next = typeof updaterOrArray === "function" ? updaterOrArray(prev) : updaterOrArray;
-      if(!user) return next;
+      if(!userRef.current) return next;
       next.forEach(function(s){
         var old = prev.find(function(x){ return x.id===s.id; });
         if(!old || JSON.stringify(old) !== JSON.stringify(s)) fbSet("shipments", s.id, s);
@@ -609,7 +610,7 @@ function App(){
   function saveLocations(updaterOrArray){
     setLocations(function(prev){
       var next = typeof updaterOrArray === "function" ? updaterOrArray(prev) : updaterOrArray;
-      if(!user) return next;
+      if(!userRef.current) return next;
       next.forEach(function(l){
         var old = prev.find(function(x){ return x.id===l.id; });
         if(!old || JSON.stringify(old) !== JSON.stringify(l)) fbSet("locations", l.id, l);
@@ -623,7 +624,7 @@ function App(){
   function saveRequestors(updaterOrArray){
     setRequestors(function(prev){
       var next = typeof updaterOrArray === "function" ? updaterOrArray(prev) : updaterOrArray;
-      if(!user) return next;
+      if(!userRef.current) return next;
       next.forEach(function(r){
         var old = prev.find(function(x){ return x.id===r.id; });
         if(!old || JSON.stringify(old) !== JSON.stringify(r)) fbSet("requestors", r.id, r);
@@ -686,8 +687,8 @@ function App(){
       try {
         const s = JSON.parse(evt.target.result);
         if(!s.tickets) throw new Error();
-        setTickets(s.tickets); setShipments(s.shipments||[]); setLocations(s.locations||[]); setRequestors(s.requestors||[]); setVendorReport(null);
-        setImportMsg({ok:true, text:`Loaded ${s.tickets.length} ticket(s) from "${file.name}" (saved ${s.exportedAt})`});
+        saveTickets(s.tickets||[]); saveShipments(s.shipments||[]); saveLocations(s.locations||[]); saveRequestors(s.requestors||[]); setVendorReport(null);
+        setImportMsg({ok:true, text:"Loaded "+s.tickets.length+" ticket(s) from \""+file.name+"\" — writing to Firestore…"});
       } catch(err){
         setImportMsg({ok:false, text:"Invalid session file."});
       }
