@@ -785,8 +785,9 @@ function App(){
             </div>
           )}
           {/* Tabs */}
-          <div style={{display:"flex", gap:2, marginTop:16}}>
+          <div style={{display:showSettings?"none":"flex", gap:2, marginTop:16}}>
             {TABS.map(function(t,i){
+              if(i===1 && !user) return null; // hide Pickup Scan for non-signed-in users
               return (
                 <button key={t} className="tab-btn" onClick={function(){ setTab(i); }} style={{
                   background:tab===i?"#1d4ed8":"transparent", color:tab===i?"#fff":"#64748b",
@@ -794,7 +795,7 @@ function App(){
                   padding:"9px 18px", fontSize:12, fontFamily:"inherit", fontWeight:tab===i?500:400,
                   letterSpacing:0.3, borderRadius:"6px 6px 0 0", position:"relative"
                 }}>
-                  {["① ","② ","③ ","④ ","⑤ ","⑥ "][i]}{t}
+                  {t}
                   {i===0 && tickets.length>0 && <span style={{marginLeft:6,background:"#1e40af",color:"#93c5fd",borderRadius:999,padding:"1px 6px",fontSize:10}}>{tickets.length}</span>}
                   {i===1 && pendingCount>0 && <span style={{marginLeft:6,background:"#1e3a5f",color:"#93c5fd",borderRadius:999,padding:"1px 6px",fontSize:10}}>{pendingCount}</span>}
                   {i===2 && shipments.length>0 && <span style={{marginLeft:6,background:"#1e40af",color:"#93c5fd",borderRadius:999,padding:"1px 6px",fontSize:10}}>{shipments.length}</span>}
@@ -806,7 +807,7 @@ function App(){
       </div>
 
       <div style={{maxWidth:1020, margin:"32px auto 0", padding:"0 24px"}}>
-        {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} onClose={function(){ setShowSettings(false); }} readOnly={!user}/>}
+        {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} tickets={tickets} shipments={shipments} onClose={function(){ setShowSettings(false); }} readOnly={!user}/>}
         {!showSettings && tab===0 && <TicketsTab tickets={tickets} setTickets={saveTickets} setVendorReport={setVendorReport} setTab={setTab} openTicketId={openTicketId} setOpenTicketId={setOpenTicketId} locations={locations} requestors={requestors} readOnly={!user}/>}
         {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user}/>}
         {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user}/>}
@@ -821,7 +822,7 @@ function App(){
 // ══════════════════════════════════════════════════════════════════
 // SETTINGS PAGE
 // ══════════════════════════════════════════════════════════════════
-function SettingsPage({locations, setLocations, requestors, setRequestors, onClose, readOnly}){
+function SettingsPage({locations, setLocations, requestors, setRequestors, tickets, shipments, onClose, readOnly}){
   const [section, setSection] = useState("locations");
 
   // ── Locations ────────────────────────────────────────────────────
@@ -870,23 +871,6 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, onClo
           <div style={{fontSize:12,color:"#64748b",marginTop:2}}>Manage locations, addresses, and requestor contact info.</div>
         </div>
         <div style={{display:"flex",gap:8}}>
-          <button onClick={function(){
-            var nl = "\n";
-            var locLines = (locations||[]).map(function(l){
-              return "  { name: "+JSON.stringify(l.name)+", address: "+JSON.stringify(l.address||"")+", campus: "+JSON.stringify(l.campus||"")+" }";
-            }).join(","+nl);
-            var locJs = "var LOCATIONS = ["+nl+locLines+nl+"];";
-            var reqLines = (requestors||[]).map(function(r){
-              return "  { name: "+JSON.stringify(r.name)+", email: "+JSON.stringify(r.email||"")+", phone: "+JSON.stringify(r.phone||"")+", department: "+JSON.stringify(r.department||"")+" }";
-            }).join(","+nl);
-            var reqJs = "var REQUESTORS = ["+nl+reqLines+nl+"];";
-            var full = locJs+nl+nl+reqJs;
-            navigator.clipboard.writeText(full).then(function(){
-              alert("Config copied!\n\nPaste into the config block at the top of DisposalRequest index.html, replacing the LOCATIONS and REQUESTORS arrays.");
-            }).catch(function(){
-              prompt("Copy this and paste into DisposalRequest index.html:", full);
-            });
-          }} style={{background:"linear-gradient(135deg,#4f46e5,#7c3aed)",color:"#fff",border:"none",borderRadius:8,padding:"9px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>📋 Copy Form Config</button>
           <button onClick={onClose} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"9px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>← Back to App</button>
         </div>
       </div>
@@ -2995,7 +2979,7 @@ function PickupScanForm({ticket, onSave, onBack}){
                         ) : (
                           <React.Fragment>
                             <span style={{color:"#475569",fontSize:11,marginRight:8}}>Pending</span>
-                            <button onClick={function(){ toggleWaive(a.serial); }} style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}} title="Mark as Waived — will not count as missing">Waive</button>
+                            {!readOnly && <button onClick={function(){ toggleWaive(a.serial); }} style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}} title="Mark as Waived — will not count as missing">Waive</button>}
                           </React.Fragment>
                         )}
                       </td>
@@ -3222,17 +3206,19 @@ function decodePickupNo(name){
   return {vendor:vendor, dateStr:dateStr, seq:seq};
 }
 
-function pickupNoInput(value, onChange){
+function pickupNoInput(value, onChange, disabled){
   return <input value={value}
     onChange={function(e){
+      if(disabled) return;
       var raw = e.target.value.replace(/[^0-9]/g,"");
       var fmt = raw;
       if(raw.length > 2)  fmt = raw.slice(0,2)+"-"+raw.slice(2);
       if(raw.length > 10) fmt = raw.slice(0,2)+"-"+raw.slice(2,10)+"-"+raw.slice(10,12);
       onChange(fmt);
     }}
+    disabled={disabled}
     placeholder="NN-NNNNNNNN-NN" maxLength={14}
-    style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:14,fontFamily:"'Geist Mono',monospace",letterSpacing:1}}/>;
+    style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:14,fontFamily:"'Geist Mono',monospace",letterSpacing:1,opacity:disabled?0.6:1}}/>;
 }
 
 var STATUS_META = {
@@ -3291,7 +3277,7 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
     setShipments(function(prev){ return prev.map(function(x){ return x.id===s.id?updated:x; }); });
   }
 
-  if(view==="form") return <VendorPickupForm pickup={editing} tickets={tickets} onSave={save} onCancel={function(){ setView("list"); }}/>;
+  if(view==="form") return <VendorPickupForm pickup={editing} tickets={tickets} onSave={save} onCancel={function(){ setView("list"); }} readOnly={readOnly}/>;
 
   return (
     <div>
@@ -3300,14 +3286,14 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
           <div style={{fontFamily:"'Geist',sans-serif",fontWeight:700,fontSize:18,color:"#f1f5f9"}}>Vendor Pickups</div>
           <div style={{fontSize:12,color:"#64748b",marginTop:2}}>Track vendor pickup events and the tickets included in each.</div>
         </div>
-        <button onClick={openNew} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>+ New Vendor Pickup</button>
+        {!readOnly && <button onClick={openNew} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>+ New Vendor Pickup</button>}
       </div>
 
       {shipments.length===0 ? (
         <div style={{textAlign:"center",padding:"60px 20px",border:"1px dashed #334155",borderRadius:12,color:"#475569"}}>
           <div style={{fontSize:40,marginBottom:12}}>🚛</div>
           <div style={{fontSize:14,marginBottom:16}}>No vendor pickups yet.</div>
-          <button onClick={openNew} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"10px 22px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>+ Create First Vendor Pickup</button>
+          {!readOnly && <button onClick={openNew} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"10px 22px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>+ Create First Vendor Pickup</button>}
         </div>
       ) : (
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -3332,13 +3318,13 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
                   </div>
                 </div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                  {s.status!=="reconciled" && (
+                  {!readOnly && s.status!=="reconciled" && (
                     <button onClick={function(){ advanceStatus(s); }} style={{background:"#0f172a",color:sm.color,border:"1px solid "+sm.border,borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>
                       {s.status==="scheduled"?"Mark Picked Up ▸":"Mark Reconciled ▸"}
                     </button>
                   )}
-                  <button onClick={function(){ openEdit(s); }} style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>Edit</button>
-                  <button onClick={function(){ del(s.id); }} style={{background:"#0f172a",color:"#ef4444",border:"1px solid #450a0a",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:12}}>✕</button>
+                  <button onClick={function(){ openEdit(s); }} style={{background:"#0f172a",color:readOnly?"#475569":"#93c5fd",border:"1px solid "+(readOnly?"#334155":"#1e3a5f"),borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{readOnly?"View":"Edit"}</button>
+                  {!readOnly && <button onClick={function(){ del(s.id); }} style={{background:"#0f172a",color:"#ef4444",border:"1px solid #450a0a",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:12}}>✕</button>}
                 </div>
               </div>
             );
@@ -3349,7 +3335,7 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
   );
 }
 
-function VendorPickupForm({pickup, tickets, onSave, onCancel}){
+function VendorPickupForm({pickup, tickets, onSave, onCancel, readOnly}){
   var isNew = !pickup.name;
   const [form, setForm] = useState(function(){
     var f = {...pickup, ticketIds:[...pickup.ticketIds]};
@@ -3432,7 +3418,7 @@ function VendorPickupForm({pickup, tickets, onSave, onCancel}){
       ? <span className="pill" style={{background:"#3b1f02",color:"#fb923c",border:"1px solid #c2410c"}}>⏳ Awaiting Approval</span>
       : <span className="pill" style={{background:"#1e293b",color:"#64748b",border:"1px solid #334155"}}>Scan Pending</span>;
     return (
-      <div key={t.id} onClick={function(){ toggle(t.id); }} style={{background:sel?"#0f2e4a":"#1e293b",border:"2px solid "+(sel?"#3b82f6":"#334155"),borderRadius:10,padding:"12px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:12,transition:"all 0.15s"}}>
+      <div key={t.id} onClick={readOnly ? undefined : function(){ toggle(t.id); }} style={{background:sel?"#0f2e4a":"#1e293b",border:"2px solid "+(sel?"#3b82f6":"#334155"),borderRadius:10,padding:"12px 16px",cursor:readOnly?"default":"pointer",display:"flex",alignItems:"center",gap:12,transition:"all 0.15s"}}>
         <div style={{width:20,height:20,borderRadius:4,flexShrink:0,background:sel?"#3b82f6":"#0f172a",border:"2px solid "+(sel?"#3b82f6":"#475569"),display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:12}}>{sel?"✓":""}</div>
         <div style={{flex:1}}>
           <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -3460,7 +3446,7 @@ function VendorPickupForm({pickup, tickets, onSave, onCancel}){
       <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px",marginBottom:20,display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:16}}>
         <div style={{gridColumn:"1/-1"}}>
           <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Vendor Pickup Number *</label>
-          {pickupNoInput(form.name, handleNameChange)}
+          {pickupNoInput(form.name, handleNameChange, readOnly)}
           {form.name && (dec.vendor||dec.dateStr) && (
             <div style={{marginTop:5,fontSize:11,color:"#64748b",display:"flex",gap:12,flexWrap:"wrap"}}>
               {dec.vendor && <span style={{color:"#93c5fd"}}>🏢 {dec.vendor}</span>}
@@ -3471,33 +3457,33 @@ function VendorPickupForm({pickup, tickets, onSave, onCancel}){
         </div>
         <div>
           <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Vendor</label>
-          <input value={form.vendor||""} onChange={function(e){ setF("vendor",e.target.value); }} placeholder="Auto-filled from number"
-            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}/>
+          <input value={form.vendor||""} onChange={function(e){ setF("vendor",e.target.value); }} placeholder="Auto-filled from number" disabled={readOnly}
+            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}/>
         </div>
         <div>
           <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Location</label>
-          <input value={form.location||""} onChange={function(e){ setF("location",e.target.value); }} placeholder="e.g. Main Campus"
-            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}/>
+          <input value={form.location||""} onChange={function(e){ setF("location",e.target.value); }} placeholder="e.g. Main Campus" disabled={readOnly}
+            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}/>
         </div>
         <div>
           <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Created Date</label>
-          <input type="date" value={form.createdDate||""} onChange={function(e){ setF("createdDate",e.target.value); }}
-            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}/>
+          <input type="date" value={form.createdDate||""} onChange={function(e){ setF("createdDate",e.target.value); }} disabled={readOnly}
+            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}/>
         </div>
         <div>
           <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Pickup Date</label>
-          <input type="date" value={form.pickupDate||""} onChange={function(e){ setF("pickupDate",e.target.value); }}
-            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}/>
+          <input type="date" value={form.pickupDate||""} onChange={function(e){ setF("pickupDate",e.target.value); }} disabled={readOnly}
+            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}/>
         </div>
         <div>
           <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Reconciliation Date</label>
-          <input type="date" value={form.reconcileDate||""} onChange={function(e){ setF("reconcileDate",e.target.value); }}
-            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}/>
+          <input type="date" value={form.reconcileDate||""} onChange={function(e){ setF("reconcileDate",e.target.value); }} disabled={readOnly}
+            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}/>
         </div>
         <div>
           <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Status</label>
-          <select value={form.status||"scheduled"} onChange={function(e){ setF("status",e.target.value); }}
-            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}>
+          <select value={form.status||"scheduled"} onChange={function(e){ setF("status",e.target.value); }} disabled={readOnly}
+            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}>
             <option value="scheduled">Scheduled</option>
             <option value="picked-up">Picked Up</option>
             <option value="reconciled">Reconciled</option>
@@ -3509,8 +3495,8 @@ function VendorPickupForm({pickup, tickets, onSave, onCancel}){
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#1e293b",border:"1px solid #334155",borderRadius:10,padding:"12px 18px",marginBottom:16}}>
         <span style={{color:"#64748b",fontSize:12}}>{form.ticketIds.length} ticket{form.ticketIds.length!==1?"s":""} in this pickup</span>
         <div style={{display:"flex",gap:10}}>
-          <button onClick={onCancel} style={{background:"#0f172a",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"9px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Cancel</button>
-          <button onClick={handleSave} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"9px 22px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>Save Vendor Pickup</button>
+          <button onClick={onCancel} style={{background:"#0f172a",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"9px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>{readOnly?"Close":"Cancel"}</button>
+          {!readOnly && <button onClick={handleSave} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"9px 22px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>Save Vendor Pickup</button>}
         </div>
       </div>
 
@@ -3568,6 +3554,7 @@ function ReconcileTab({tickets, shipments, setShipments, vendorReport, setVendor
       setVendorReport={setVendorReport}
       setTab={setTab}
       onBack={function(){ setSelectedId(null); }}
+      readOnly={readOnly}
     />;
   }
 
@@ -3618,7 +3605,7 @@ function ReconcileTab({tickets, shipments, setShipments, vendorReport, setVendor
   );
 }
 
-function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorReport, setTab, onBack}){
+function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorReport, setTab, onBack, readOnly}){
   const fileRef = useRef();
   const [vendorData, setVendorData]     = useState(null);
   const [vendorFileName, setVendorFileName] = useState(pickup.auditFileName||"");
@@ -4005,12 +3992,12 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
       {/* Upload */}
       <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px",marginBottom:16}}>
         <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:12}}>Vendor Audit File</div>
-        <div className="upload-zone" onClick={function(){ fileRef.current&&fileRef.current.click(); }}
-          style={{border:"2px dashed "+(vendorFileName?"#3b82f6":"#334155"),borderRadius:10,padding:"24px 20px",textAlign:"center",cursor:"pointer",background:vendorFileName?"#0f2e4a22":"transparent",marginBottom:vendorData?12:0}}>
-          <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={handleFile}/>
+        <div className="upload-zone" onClick={readOnly ? undefined : function(){ fileRef.current&&fileRef.current.click(); }}
+          style={{border:"2px dashed "+(vendorFileName?"#3b82f6":"#334155"),borderRadius:10,padding:"24px 20px",textAlign:"center",cursor:readOnly?"default":"pointer",background:vendorFileName?"#0f2e4a22":"transparent",marginBottom:vendorData?12:0,opacity:readOnly?0.6:1}}>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={readOnly ? undefined : handleFile} disabled={readOnly}/>
           <div style={{fontSize:28,marginBottom:6}}>{vendorFileName?"📊":"📁"}</div>
-          <div style={{color:vendorFileName?"#93c5fd":"#94a3b8",fontSize:13}}>{vendorFileName||"Click to upload vendor audit .xlsx"}</div>
-          {vendorFileName && <div style={{color:"#64748b",fontSize:11,marginTop:3}}>Click to replace</div>}
+          <div style={{color:vendorFileName?"#93c5fd":"#94a3b8",fontSize:13}}>{vendorFileName||(readOnly?"No audit file uploaded":"Click to upload vendor audit .xlsx")}</div>
+          {vendorFileName && !readOnly && <div style={{color:"#64748b",fontSize:11,marginTop:3}}>Click to replace</div>}
         </div>
         {vendorData && (
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginTop:10}}>
@@ -4020,9 +4007,9 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
               <span style={{margin:"0 8px",color:"#334155"}}>·</span>
               <span><strong style={{color:"#86efac"}}>{ourAssets.length}</strong> our assets</span>
             </div>
-            <button onClick={runReconciliation} style={{background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",color:"#fff",border:"none",borderRadius:8,padding:"10px 24px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>
+            {!readOnly && <button onClick={runReconciliation} style={{background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",color:"#fff",border:"none",borderRadius:8,padding:"10px 24px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>
               Run Reconciliation →
-            </button>
+            </button>}
           </div>
         )}
       </div>
@@ -4148,8 +4135,8 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
                                     <span style={{fontSize:11,color:"#64748b"}}>{item.machineType||""}</span>
                                     {item.ouInventory && <span style={{fontSize:11,color:"#7dd3fc"}}>🏷 {item.ouInventory}</span>}
                                     {item.vendorTag && item.vendorTag.replace(/NO ASSET TAG\s*/i,"").trim() && <span style={{fontSize:11,color:"#a78bfa"}}>vendor: {item.vendorTag.replace(/NO ASSET TAG\s*/i,"").trim()}</span>}
-                                    {isWaiveable && <button onClick={function(){ toggleWaive(item.serial); }} style={{marginLeft:"auto",background:"none",border:"1px solid #6d28d9",borderRadius:5,color:"#a78bfa",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>⊘ Waive</button>}
-                                    {isWaived    && <button onClick={function(){ toggleWaive(item.serial); }} style={{marginLeft:"auto",background:"none",border:"1px solid #334155",borderRadius:5,color:"#475569",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>Unwaive</button>}
+                                    {!readOnly && isWaiveable && <button onClick={function(){ toggleWaive(item.serial); }} style={{marginLeft:"auto",background:"none",border:"1px solid #6d28d9",borderRadius:5,color:"#a78bfa",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>⊘ Waive</button>}
+                                    {!readOnly && isWaived    && <button onClick={function(){ toggleWaive(item.serial); }} style={{marginLeft:"auto",background:"none",border:"1px solid #334155",borderRadius:5,color:"#475569",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>Unwaive</button>}
                                   </div>
                                 );
                               })}
