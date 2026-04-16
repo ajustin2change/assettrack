@@ -775,27 +775,6 @@ function App(){
                 </button>
               )}
               <input ref={jsonRef} type="file" accept=".json" style={{display:"none"}} onChange={handleLegacyLoad}/>
-              {FSA_SUPPORTED ? (
-                <React.Fragment>
-                  {fileHandle && (
-                    <div style={{fontSize:11, color:saveStatus==="saving"?"#94a3b8":saveStatus==="saved"?"#86efac":saveStatus==="error"?"#fca5a5":"#475569", display:"flex", alignItems:"center", gap:5, minWidth:140}}>
-                      {saveStatus==="saving" && <React.Fragment><span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:"#94a3b8",animation:"pulse 1s infinite"}}></span>Saving…</React.Fragment>}
-                      {saveStatus==="saved"  && <React.Fragment><span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:"#86efac"}}></span>Saved ✓</React.Fragment>}
-                      {saveStatus==="error"  && <React.Fragment><span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:"#fca5a5"}}></span>Save failed</React.Fragment>}
-                      {saveStatus==="idle"   && <React.Fragment><span style={{display:"inline-block",width:8,height:8,borderRadius:"50%",background:"#475569"}}></span>{fileHandle.name.length>24?fileHandle.name.slice(0,22)+"…":fileHandle.name}</React.Fragment>}
-                    </div>
-                  )}
-                  {!fileHandle && <button onClick={handleFSANew} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>＋ New Session File</button>}
-                  <button onClick={handleFSAOpen} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{fileHandle?"🔀 Switch File":"📂 Open Session File"}</button>
-                  {fileHandle && <button onClick={handleFSANew} style={{background:"#1e293b",color:"#64748b",border:"1px solid #1e293b",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}} title="New Session">＋ New</button>}
-                </React.Fragment>
-              ) : (
-                <React.Fragment>
-                  <div style={{fontSize:10,color:"#475569",maxWidth:160,lineHeight:1.4}}>⚠ Auto-save requires Chrome/Edge. Using manual save.</div>
-                  <button onClick={function(){ jsonRef.current && jsonRef.current.click(); }} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>⬆ Load Session</button>
-                  <button onClick={function(){ downloadSessionJson(tickets,shipments); }} disabled={!tickets.length} style={{background:tickets.length?"linear-gradient(135deg,#1d4ed8,#0284c7)":"#1e293b",color:tickets.length?"#fff":"#475569",border:"none",borderRadius:7,padding:"7px 16px",cursor:tickets.length?"pointer":"not-allowed",fontSize:12,fontFamily:"inherit"}}>⬇ Save Session</button>
-                </React.Fragment>
-              )}
             </div>
             <button onClick={function(){ setShowSettings(true); }}
               style={{background:"#1e293b",color:"#64748b",border:"1px solid #334155",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:16,lineHeight:1}} title="Settings">⚙</button>
@@ -829,9 +808,9 @@ function App(){
       <div style={{maxWidth:1020, margin:"32px auto 0", padding:"0 24px"}}>
         {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} onClose={function(){ setShowSettings(false); }} readOnly={!user}/>}
         {!showSettings && tab===0 && <TicketsTab tickets={tickets} setTickets={saveTickets} setVendorReport={setVendorReport} setTab={setTab} openTicketId={openTicketId} setOpenTicketId={setOpenTicketId} locations={locations} requestors={requestors} readOnly={!user}/>}
-        {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations}/>}
-        {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport}/>}
-        {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab}/>}
+        {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user}/>}
+        {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user}/>}
+        {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
         {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
         {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId}/>}
       </div>
@@ -842,7 +821,7 @@ function App(){
 // ══════════════════════════════════════════════════════════════════
 // SETTINGS PAGE
 // ══════════════════════════════════════════════════════════════════
-function SettingsPage({locations, setLocations, requestors, setRequestors, onClose}){
+function SettingsPage({locations, setLocations, requestors, setRequestors, onClose, readOnly}){
   const [section, setSection] = useState("locations");
 
   // ── Locations ────────────────────────────────────────────────────
@@ -914,7 +893,7 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, onClo
 
       {/* Section tabs */}
       <div style={{display:"flex",gap:4,marginBottom:20,borderBottom:"1px solid #1e293b",paddingBottom:0}}>
-        {[["locations","📍 Locations"],["requestors","✉ Requestors"]].map(function(pair){
+        {[["locations","📍 Locations"],["requestors","✉ Requestors"],["data","🗄 Data Management"]].map(function(pair){
           var active = section===pair[0];
           return (
             <button key={pair[0]} onClick={function(){ setSection(pair[0]); }}
@@ -952,7 +931,8 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, onClo
               </div>
             </div>
             <div style={{display:"flex",gap:8}}>
-              <button onClick={saveLoc} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"8px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>{locEdit?"Update Location":"Add Location"}</button>
+              {!readOnly && <button onClick={saveLoc} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"8px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>{locEdit?"Update Location":"Add Location"}</button>}
+          {readOnly && <span style={{fontSize:12,color:"#475569"}}>Sign in to make changes</span>}
               {locEdit && <button onClick={function(){ setLocEdit(null); setLocForm({name:"",address:""}); }} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"8px 16px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Cancel</button>}
             </div>
           </div>
@@ -1021,7 +1001,8 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, onClo
               </div>
             </div>
             <div style={{display:"flex",gap:8}}>
-              <button onClick={saveReq} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"8px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>{reqEdit?"Update Requestor":"Add Requestor"}</button>
+              {!readOnly && <button onClick={saveReq} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"8px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>{reqEdit?"Update Requestor":"Add Requestor"}</button>}
+          {readOnly && <span style={{fontSize:12,color:"#475569"}}>Sign in to make changes</span>}
               {reqEdit && <button onClick={function(){ setReqEdit(null); setReqForm({name:"",email:"",phone:""}); }} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"8px 16px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Cancel</button>}
             </div>
           </div>
@@ -1054,6 +1035,35 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, onClo
           )}
         </div>
       )}
+
+      {/* ── Data Management section ── */}
+      {section==="data" && (
+        <div>
+          <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px",marginBottom:20}}>
+            <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:6}}>Download Snapshot</div>
+            <div style={{fontSize:12,color:"#64748b",marginBottom:16}}>Download a full JSON snapshot of all data as a local backup. Does not affect the live database.</div>
+            <button onClick={function(){
+              var payload = {version:5, exportedAt:new Date().toLocaleString(), tickets:locations, shipments:shipments, locations:locations, requestors:requestors};
+              var blob = new Blob([JSON.stringify({version:5,exportedAt:new Date().toLocaleString(),tickets:tickets,shipments:shipments,locations:locations,requestors:requestors},null,2)],{type:"application/json"});
+              var url = URL.createObjectURL(blob);
+              var a = document.createElement("a"); a.href=url; a.download="AssetTrack-Snapshot-"+new Date().toISOString().slice(0,10)+".json"; a.click(); URL.revokeObjectURL(url);
+            }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"9px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>⬇ Download Snapshot</button>
+          </div>
+          <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px"}}>
+            <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:12}}>Database Stats</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:12}}>
+              {[{label:"Tickets",value:tickets.length,color:"#93c5fd"},{label:"Shipments",value:shipments.length,color:"#86efac"},{label:"Locations",value:locations.length,color:"#fde047"},{label:"Requestors",value:requestors.length,color:"#c4b5fd"}].map(function(s){
+                return (
+                  <div key={s.label} style={{background:"#0f172a",borderRadius:8,padding:"14px 16px",textAlign:"center"}}>
+                    <div style={{fontSize:24,fontWeight:700,color:s.color}}>{s.value}</div>
+                    <div style={{fontSize:11,color:"#64748b",marginTop:4}}>{s.label}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1062,7 +1072,7 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, onClo
 // ══════════════════════════════════════════════════════════════════
 // TAB 1 — TICKETS
 // ══════════════════════════════════════════════════════════════════
-function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId, setOpenTicketId, locations, requestors}){
+function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId, setOpenTicketId, locations, requestors, readOnly}){
   const [view, setView]               = useState("list");
   const [active, setActive]           = useState(null);
   const [importMsg, setImportMsg]     = useState(null);
@@ -1345,7 +1355,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
     saveTicket({...t, pickupScanned:false, pickupResult:null, assets:[], approvalStatus:undefined, approvalFile:undefined, approvalUploadedAt:undefined});
     setTab(1); // Pickup Scan tab
   }
-  if(view==="new"||view==="edit") return <TicketForm ticket={active} tickets={tickets} locations={locations} requestors={requestors} onSave={saveTicket} onCancel={function(){ setView("list"); }} onDelete={function(id){ deleteTicket(id); setView("list"); }} onRescan={doRescan} isNew={view==="new"}/>;
+  if(view==="new"||view==="edit") return <TicketForm ticket={active} tickets={tickets} locations={locations} requestors={requestors} onSave={saveTicket} onCancel={function(){ setView("list"); }} onDelete={function(id){ deleteTicket(id); setView("list"); }} onRescan={doRescan} isNew={view==="new"} readOnly={readOnly}/>;
 
   return (
     <div>
@@ -1356,11 +1366,15 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
           <div style={{fontSize:12, color:"#64748b", marginTop:2}}>Create tickets manually or import from a client Excel spreadsheet.</div>
         </div>
         <div style={{display:"flex", gap:8, flexWrap:"wrap", alignItems:"center"}}>
-          <button onClick={function(){ importXlsxRef.current && importXlsxRef.current.click(); }} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"10px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>📂 Import Ticket File</button>
-          <button onClick={openNew} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>+ New Ticket</button>
-          <div style={{width:1,height:28,background:"#334155",margin:"0 4px",flexShrink:0}}/>
+          {!readOnly && (
+            <React.Fragment>
+              <button onClick={function(){ importXlsxRef.current && importXlsxRef.current.click(); }} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"10px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>📂 Import Ticket File</button>
+              <button onClick={openNew} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"10px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>+ New Ticket</button>
+              <div style={{width:1,height:28,background:"#334155",margin:"0 4px",flexShrink:0}}/>
+            </React.Fragment>
+          )}
           <button onClick={exportAllSerials} style={{background:"#0f172a",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"10px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit",display:"flex",alignItems:"center",gap:6}}>⬇ Export All Serials</button>
-
+          {readOnly && <span style={{fontSize:11,color:"#475569",background:"#1e293b",border:"1px solid #334155",borderRadius:6,padding:"6px 12px"}}>👁 View only — sign in to edit</span>}
         </div>
       </div>
       {importMsg && (
@@ -1536,7 +1550,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
                       )}
                     </React.Fragment>
                   )}
-                  <button onClick={function(){ openEdit(t); }} style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>Open / Edit</button>
+                  <button onClick={function(){ openEdit(t); }} style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{readOnly?"View":"Open / Edit"}</button>
                 </div>
               </div>
             );
@@ -1549,7 +1563,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
 }
 
 // ── Ticket Form ───────────────────────────────────────────────────
-function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, onDelete, onRescan, isNew}){
+function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, onDelete, onRescan, isNew, readOnly}){
   const defaultCounts = {lcdMonitors:0, miscBoxes:0, hardDriveBoxes:0, printers:0};
   const [form, setForm]           = useState({...ticket, expectedAssets:[...(ticket.expectedAssets||[])], itemCounts:{...defaultCounts,...(ticket.itemCounts||{})}});
   const [xlsxCols, setXlsxCols]   = useState([]);
@@ -1790,8 +1804,8 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:10}}>
         <button onClick={onCancel} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:13,fontFamily:"inherit",padding:0}}>← Back to Tickets</button>
         <div style={{display:"flex",gap:8}}>
-          <button onClick={onCancel} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"8px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Cancel</button>
-          <button onClick={handleSave} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"8px 22px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>Save Ticket</button>
+          <button onClick={onCancel} style={{background:"#1e293b",color:"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"8px 18px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>{readOnly?"Close":"Cancel"}</button>
+          {!readOnly && <button onClick={handleSave} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"8px 22px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>Save Ticket</button>}
         </div>
       </div>
       <div style={{fontFamily:"'Geist',sans-serif", fontWeight:700, fontSize:18, color:"#f1f5f9", marginBottom:16}}>{isNew?"New Pickup Ticket":`Editing Ticket #${form.ticketNo}`}</div>
@@ -2214,7 +2228,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
 // ══════════════════════════════════════════════════════════════════
 // TAB 2 — PICKUP SCAN
 // ══════════════════════════════════════════════════════════════════
-function PickupScanTab({tickets, setTickets, locations}){
+function PickupScanTab({tickets, setTickets, locations, readOnly}){
   const [selectedId, setSelectedId] = useState(null);
   const ticket = tickets.find(function(t){ return t.id===selectedId; }) || null;
   function saveTicket(updated){ setTickets(function(prev){ return prev.map(function(t){ return t.id===updated.id?updated:t; }); }); }
@@ -3228,7 +3242,7 @@ var STATUS_META = {
   "reconciled":   {label:"Reconciled",   color:"#86efac", bg:"#052e16", border:"#166534"},
 };
 
-function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorReport}){
+function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorReport, readOnly}){
   const [view, setView]     = useState("list");
   const [editing, setEditing] = useState(null);
 
@@ -3542,7 +3556,7 @@ function VendorPickupForm({pickup, tickets, onSave, onCancel}){
 // ══════════════════════════════════════════════════════════════════
 // TAB 4 — RECONCILE
 // ══════════════════════════════════════════════════════════════════
-function ReconcileTab({tickets, shipments, setShipments, vendorReport, setVendorReport, setTab}){
+function ReconcileTab({tickets, shipments, setShipments, vendorReport, setVendorReport, setTab, readOnly}){
   const [selectedId, setSelectedId] = useState(null);
   const selected = shipments.find(function(x){ return x.id===selectedId; }) || null;
 
