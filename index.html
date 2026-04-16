@@ -2471,7 +2471,7 @@ function PickupScanTab({tickets, setTickets, locations, readOnly}){
 
     // Build Google Maps directions URL
     var mapsUrl = (function(){
-      var GMAPS_API_KEY = ""; // Drop your API key here when ready
+      var GMAPS_API_KEY = "AIzaSyBk-Z0RmnWFaBlBr-E0jTOMBnNp2cUfU38"; // Drop your API key here when ready
       var addrs = todayTickets.map(function(t){
         var loc = (locations||[]).find(function(l){ return l.name===t.site; });
         return loc && loc.address ? loc.address : (t.site||"");
