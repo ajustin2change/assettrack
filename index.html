@@ -2479,7 +2479,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
 function PickupScanTab({tickets, setTickets, locations, readOnly, routeOrder, setRouteOrder}){
   const [selectedId, setSelectedId] = useState(null);
   const ticket = tickets.find(function(t){ return t.id===selectedId; }) || null;
-  function saveTicket(updated){ setTickets(function(prev){ return prev.map(function(t){ return t.id===updated.id?updated:t; }); }); }
+  function saveTicket(updated){ setTickets(updated); }
   const eligible = tickets.filter(function(t){ return (t.expectedAssets||[]).length>0 && pickupStatus(t)==="pending"; })
     .slice().sort(function(a,b){ return String(b.ticketNo).localeCompare(String(a.ticketNo), undefined, {numeric:true}); });
 
