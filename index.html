@@ -23,14 +23,6 @@
 });
     var db   = firebase.firestore();
     var auth = firebase.auth();
-    // Enable offline persistence so writes survive page reloads when offline
-    db.enablePersistence({synchronizeTabs:true}).catch(function(e){
-      if(e.code==="failed-precondition"){
-        console.warn("Offline persistence unavailable: multiple tabs open.");
-      } else if(e.code==="unimplemented"){
-        console.warn("Offline persistence not supported in this browser.");
-      }
-    });
   </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
