@@ -3244,7 +3244,7 @@ function PickupScanForm({ticket, onSave, onBack}){
                         ) : (
                           <React.Fragment>
                             <span style={{color:"#475569",fontSize:11,marginRight:8}}>Pending</span>
-                            {!readOnly && <button onClick={function(){ toggleWaive(a.serial); }} style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}} title="Mark as Waived — will not count as missing">Waive</button>}
+                            <button onClick={function(){ toggleWaive(a.serial); }} style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}} title="Mark as Waived — will not count as missing">Waive</button>
                           </React.Fragment>
                         )}
                       </td>
