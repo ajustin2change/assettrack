@@ -122,7 +122,7 @@ function localDateStr(d){
 // Values treated as "no tag" for matching purposes
 var BLANK_TAG_PATTERNS = /^(unknown|n\/?a|none|n\.a\.|nil|no asset tag|no tag|—|-)$/i;
 function isBlankTag(v){ return !v || !v.trim() || BLANK_TAG_PATTERNS.test(v.trim()); }
-function fmtDate(iso){ return iso ? new Date(iso).toLocaleDateString() : "—"; }
+function fmtDate(iso){ if(!iso) return "—"; var p=iso.split("-"); return new Date(p[0],p[1]-1,p[2]).toLocaleDateString(); }
 
 function findCol(sampleRow, name){
   const keys = Object.keys(sampleRow);
