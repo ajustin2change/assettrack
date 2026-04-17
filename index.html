@@ -111,6 +111,13 @@ const TABS = ["Tickets","Pickup Scan","Vendor Pickup","Reconcile","Report","Audi
 
 // ── Helpers ───────────────────────────────────────────────────────
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+function localDateStr(d){
+  var dt = d || new Date();
+  var y = dt.getFullYear();
+  var m = String(dt.getMonth()+1).padStart(2,"0");
+  var day = String(dt.getDate()).padStart(2,"0");
+  return y+"-"+m+"-"+day;
+}
 
 // Values treated as "no tag" for matching purposes
 var BLANK_TAG_PATTERNS = /^(unknown|n\/?a|none|n\.a\.|nil|no asset tag|no tag|—|-)$/i;
@@ -538,6 +545,7 @@ function App(){
   const jsonRef         = useRef();
   const saveTimer       = useRef(null);
   const [pendingSession, setPendingSession] = useState(null); // session waiting to push
+  const [routeOrder, setRouteOrder]       = useState(null);  // persists pickup route order across tabs
 
   // ── Firebase Auth ─────────────────────────────────────────────
   useEffect(function(){
@@ -805,7 +813,7 @@ function App(){
       <div style={{maxWidth:1020, margin:"32px auto 0", padding:"0 24px"}}>
         {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} tickets={tickets} shipments={shipments} onClose={function(){ setShowSettings(false); }} readOnly={!user}/>}
         {!showSettings && tab===0 && <TicketsTab tickets={tickets} setTickets={saveTickets} setVendorReport={setVendorReport} setTab={setTab} openTicketId={openTicketId} setOpenTicketId={setOpenTicketId} locations={locations} requestors={requestors} readOnly={!user}/>}
-        {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user}/>}
+        {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user} routeOrder={routeOrder} setRouteOrder={setRouteOrder}/>}
         {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user}/>}
         {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
         {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
@@ -1315,7 +1323,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
   const [filterStatus, setFilterStatus] = useState("all"); // all | needs-scan | awaiting-approval | verified
 
   const blankTicket = function(){
-    return {id:uid(), ticketNo:"", date:new Date().toISOString().slice(0,10), site:"", requestor:"", phone:"", notes:"", vendorPickupNo:"",
+    return {id:uid(), ticketNo:"", date:localDateStr(), site:"", requestor:"", phone:"", notes:"", vendorPickupNo:"",
       expectedAssets:[], itemCounts:{lcdMonitors:0,miscBoxes:0,hardDriveBoxes:0,printers:0},
       pickupScanned:false, pickupResult:null};
   };
@@ -1502,7 +1510,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
     return {
       id:             uid(),
       ticketNo:       '',
-      date:           dateFromFile || new Date().toISOString().slice(0,10),
+      date:           dateFromFile || localDateStr(),
       site:           site,
       requestor:      requestorDisplay,
       phone:          fmtPhone,
@@ -1559,7 +1567,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
         var newTicket = {
           id:             uid(),
           ticketNo:       file.name.replace(/\.(xlsx|xls|csv)$/i, "").trim(),
-          date:           new Date().toISOString().slice(0,10),
+          date:           localDateStr(),
           site:           "",
           requestor:      "",
           phone:          "",
@@ -1730,7 +1738,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
                     {ps==="verified"          && <span className="pill" style={{background:"#052e16",color:"#86efac",border:"1px solid #166534"}}>✓ Pickup Verified</span>}
                     {ps==="awaiting-approval"  && <span className="pill" style={{background:"#3b1f02",color:"#fb923c",border:"1px solid #c2410c"}}>⏳ Awaiting Approval</span>}
                     {ps==="pending" && (t.expectedAssets||[]).length>0 && (function(){
-                      var today = new Date().toISOString().slice(0,10);
+                      var today = localDateStr();
                       var spd = t.scheduledPickupDate||"";
                       var overdue = spd && spd < today;
                       var scheduled = spd && spd >= today;
@@ -2152,7 +2160,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
               while(d.getDay()!==targetDay && tries<14){ d.setDate(d.getDate()+1); tries++; }
               // Check load — skip weeks until under 6
               for(var weeks=0; weeks<8; weeks++){
-                var dateStr = d.toISOString().slice(0,10);
+                var dateStr = localDateStr(d);
                 var count = (tickets||[]).filter(function(t){ return t.scheduledPickupDate===dateStr && t.id!==form.id; }).length;
                 if(count<6){ setF("scheduledPickupDate", dateStr); return; }
                 d.setDate(d.getDate()+7);
@@ -2468,18 +2476,18 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
 // ══════════════════════════════════════════════════════════════════
 // TAB 2 — PICKUP SCAN
 // ══════════════════════════════════════════════════════════════════
-function PickupScanTab({tickets, setTickets, locations, readOnly}){
+function PickupScanTab({tickets, setTickets, locations, readOnly, routeOrder, setRouteOrder}){
   const [selectedId, setSelectedId] = useState(null);
   const ticket = tickets.find(function(t){ return t.id===selectedId; }) || null;
   function saveTicket(updated){ setTickets(function(prev){ return prev.map(function(t){ return t.id===updated.id?updated:t; }); }); }
   const eligible = tickets.filter(function(t){ return (t.expectedAssets||[]).length>0 && pickupStatus(t)==="pending"; })
     .slice().sort(function(a,b){ return String(b.ticketNo).localeCompare(String(a.ticketNo), undefined, {numeric:true}); });
 
-  const [routeOrder, setRouteOrder] = useState(null); // null = use default order
+  // routeOrder and setRouteOrder come from App props — persists across tab switches
   const [dragOver, setDragOver]     = useState(null);
 
   if(!selectedId || !ticket){
-    var todayStr = new Date().toISOString().slice(0,10);
+    var todayStr = localDateStr();
     var baseTodayTickets = tickets.filter(function(t){ return t.scheduledPickupDate===todayStr; })
       .slice().sort(function(a,b){ return String(a.ticketNo).localeCompare(String(b.ticketNo),undefined,{numeric:true}); });
 
@@ -3491,7 +3499,7 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
   var blankPickup = function(){
     return {
       id:uid(), name:"", vendor:"", location:"",
-      createdDate:new Date().toISOString().slice(0,10),
+      createdDate:localDateStr(),
       pickupDate:"", reconcileDate:"",
       status:"scheduled", ticketIds:[]
     };
@@ -3530,7 +3538,7 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
     var next = s.status==="scheduled"?"picked-up":s.status==="picked-up"?"reconciled":null;
     if(!next) return;
     var updated = {...s, status:next};
-    if(next==="reconciled") updated.reconcileDate = new Date().toISOString().slice(0,10);
+    if(next==="reconciled") updated.reconcileDate = localDateStr();
     setShipments(function(prev){ return prev.map(function(x){ return x.id===s.id?updated:x; }); });
   }
 
@@ -4222,7 +4230,7 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
     // Save audit info + report back to the pickup record
     setShipments(function(prev){ return prev.map(function(x){
       if(x.id!==pickup.id) return x;
-      return {...x, auditFileName:vendorData.fileName, auditPo:po, reconcileReport:result, status:"reconciled", reconcileDate:new Date().toISOString().slice(0,10)};
+      return {...x, auditFileName:vendorData.fileName, auditPo:po, reconcileReport:result, status:"reconciled", reconcileDate:localDateStr()};
     }); });
     setVendorReport(result);
     } catch(err){ alert("Reconciliation error: " + err.message + "\n\nStack: " + (err.stack||"").split("\n").slice(0,3).join("\n")); }
