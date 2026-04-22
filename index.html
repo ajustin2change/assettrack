@@ -546,6 +546,7 @@ function App(){
   const saveTimer       = useRef(null);
   const [pendingSession, setPendingSession] = useState(null); // session waiting to push
   const [routeOrder, setRouteOrder]       = useState(null);  // persists pickup route order across tabs
+  const [openShipmentId, setOpenShipmentId] = useState(null); // navigate to specific vendor pickup
 
   // ── Firebase Auth ─────────────────────────────────────────────
   useEffect(function(){
@@ -814,10 +815,10 @@ function App(){
         {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} tickets={tickets} shipments={shipments} onClose={function(){ setShowSettings(false); }} readOnly={!user}/>}
         {!showSettings && tab===0 && <TicketsTab tickets={tickets} setTickets={saveTickets} setVendorReport={setVendorReport} setTab={setTab} openTicketId={openTicketId} setOpenTicketId={setOpenTicketId} locations={locations} requestors={requestors} readOnly={!user}/>}
         {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user} routeOrder={routeOrder} setRouteOrder={setRouteOrder}/>}
-        {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user}/>}
+        {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user} openShipmentId={openShipmentId} setOpenShipmentId={setOpenShipmentId}/>}
         {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
         {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
-        {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId}/>}
+        {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId} setOpenShipmentId={setOpenShipmentId}/>}
       </div>
     </div>
   );
@@ -3492,7 +3493,7 @@ var STATUS_META = {
   "reconciled":   {label:"Reconciled",   color:"#86efac", bg:"#052e16", border:"#166534"},
 };
 
-function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorReport, readOnly}){
+function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorReport, readOnly, openShipmentId, setOpenShipmentId}){
   const [view, setView]     = useState("list");
   const [editing, setEditing] = useState(null);
 
@@ -3507,6 +3508,13 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
 
   function openNew(){ setEditing(blankPickup()); setView("form"); }
   function openEdit(s){ setEditing({...s, ticketIds:[...s.ticketIds]}); setView("form"); }
+
+  useEffect(function(){
+    if(!openShipmentId) return;
+    var s = shipments.find(function(x){ return x.id===openShipmentId; });
+    if(s) openEdit(s);
+    setOpenShipmentId(null);
+  }, [openShipmentId]);
 
   function save(s, writeBack){
     setShipments(function(prev){
@@ -4825,9 +4833,70 @@ function ReportTab({report, tickets, shipments, setTab}){
 }
 
 
-function AuditXRefTab({tickets, shipments, setTab, setOpenTicketId}){
-  const [results, setResults] = useState(null);
-  const [running, setRunning] = useState(false);
+function AuditXRefTab({tickets, shipments, setTab, setOpenTicketId, setOpenShipmentId}){
+  const [results,      setResults]      = useState(null);
+  const [running,      setRunning]      = useState(false);
+  const [serialSearch, setSerialSearch] = useState("");
+  const [serialResult, setSerialResult] = useState(null); // null | {found, hits:[]}
+
+  function searchSerial(raw){
+    var q = raw.trim().toUpperCase();
+    if(!q){ setSerialResult(null); return; }
+    var qNorm = /^\d+$/.test(q) ? String(parseInt(q,10)) : q;
+    var hits = [];
+
+    // Search all tickets
+    tickets.forEach(function(t){
+      var seen = new Set();
+      var allAssets = [];
+      [(t.expectedAssets||[]),(t.assets||[])].forEach(function(list){
+        list.forEach(function(a){
+          if(!a.serial || seen.has(a.serial.toUpperCase())) return;
+          seen.add(a.serial.toUpperCase());
+          allAssets.push(a);
+        });
+      });
+      allAssets.forEach(function(a){
+        var su = a.serial.toUpperCase();
+        var sn = /^\d+$/.test(su) ? String(parseInt(su,10)) : su;
+        if(su.includes(q) || sn.includes(qNorm)){
+          hits.push({
+            type:         "ticket",
+            serial:       a.serial,
+            manufacturer: a.manufacturer||"",
+            machineType:  a.machineType||"",
+            ouInventory:  a.ouInventory||"",
+            ticketNo:     t.ticketNo||"(no number)",
+            ticketId:     t.id,
+            site:         t.site||"",
+            requestor:    t.requestor||"",
+            source:       (t.assets||[]).find(function(x){ return x.serial.toUpperCase()===su; }) ? "scanned" : "expected",
+          });
+        }
+      });
+    });
+
+    // Search vendor audit serials
+    shipments.forEach(function(s){
+      var vserials = (s.reconcileReport && s.reconcileReport.vendorSerials) || [];
+      vserials.forEach(function(vs){
+        var su = vs.toUpperCase();
+        var sn = /^\d+$/.test(su) ? String(parseInt(su,10)) : su;
+        if(su.includes(q) || sn.includes(qNorm)){
+          hits.push({
+            type:       "shipment",
+            serial:     vs,
+            shipmentId: s.id,
+            shipmentName: s.name,
+            vendor:     s.vendor||"",
+            fileName:   (s.reconcileReport&&s.reconcileReport.fileName)||s.auditFileName||"",
+          });
+        }
+      });
+    });
+
+    setSerialResult({q:raw, hits:hits});
+  }
 
   function run(){
     setRunning(true);
@@ -4965,6 +5034,107 @@ function AuditXRefTab({tickets, shipments, setTab, setOpenTicketId}){
     <div>
       <div style={{fontFamily:"'Geist',sans-serif",fontWeight:700,fontSize:18,color:"#f1f5f9",marginBottom:4}}>Audit Cross-Reference</div>
       <div style={{fontSize:12,color:"#64748b",marginBottom:20}}>Cross-references all ticket serials against every reconciled vendor audit to find mismatches and unexpected appearances.</div>
+
+      {/* ── Serial Search ── */}
+      <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"18px 22px",marginBottom:20}}>
+        <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:10}}>🔍 Serial Number Lookup</div>
+        <div style={{display:"flex",gap:10,marginBottom:12}}>
+          <input value={serialSearch} onChange={function(e){ setSerialSearch(e.target.value); searchSerial(e.target.value); }}
+            placeholder="Type a serial number to search all tickets and audits…"
+            style={{flex:1,background:"#0f172a",border:"1px solid #334155",borderRadius:8,color:"#f1f5f9",padding:"10px 14px",fontSize:13,fontFamily:"'Geist Mono',monospace",letterSpacing:0.5,outline:"none"}}/>
+          {serialSearch && <button onClick={function(){ setSerialSearch(""); setSerialResult(null); }}
+            style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:8,padding:"10px 14px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>✕ Clear</button>}
+        </div>
+
+        {serialResult && (
+          <div>
+            {serialResult.hits.length===0 ? (
+              <div style={{fontSize:13,color:"#475569",padding:"12px 0"}}>No matches found for "{serialResult.q}".</div>
+            ) : (function(){
+              // Group hits by serial
+              var grouped = {};
+              serialResult.hits.forEach(function(h){
+                var key = h.serial.toUpperCase();
+                if(!grouped[key]) grouped[key] = {serial:h.serial, tickets:[], shipments:[]};
+                if(h.type==="ticket")   grouped[key].tickets.push(h);
+                if(h.type==="shipment") grouped[key].shipments.push(h);
+              });
+              var groups = Object.values(grouped);
+              return (
+                <div>
+                  <div style={{fontSize:12,color:"#64748b",marginBottom:10}}>{groups.length} unique serial{groups.length!==1?"s":""} found for "{serialResult.q}"</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                    {groups.map(function(g,i){
+                      var t0 = g.tickets[0];
+                      return (
+                        <div key={i} style={{background:"#0f172a",borderRadius:10,border:"1px solid #334155",padding:"14px 18px"}}>
+                          {/* Serial header */}
+                          <div style={{fontFamily:"'Geist Mono',monospace",fontSize:14,color:"#f1f5f9",fontWeight:600,marginBottom:10}}>
+                            {g.serial}
+                          </div>
+                          {/* Asset details from ticket if available */}
+                          {t0 && (t0.manufacturer||t0.machineType||t0.ouInventory) && (
+                            <div style={{fontSize:11,color:"#64748b",display:"flex",gap:12,flexWrap:"wrap",marginBottom:10}}>
+                              {t0.manufacturer && <span>{t0.manufacturer}</span>}
+                              {t0.machineType  && <span>{t0.machineType}</span>}
+                              {t0.ouInventory  && <span>🏷 {t0.ouInventory}</span>}
+                            </div>
+                          )}
+                          {/* Tickets section */}
+                          {g.tickets.length>0 && (
+                            <div style={{marginBottom:g.shipments.length>0?10:0}}>
+                              <div style={{fontSize:11,color:"#475569",textTransform:"uppercase",letterSpacing:0.7,marginBottom:6}}>📋 Tickets ({g.tickets.length})</div>
+                              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                                {g.tickets.map(function(h,j){
+                                  return (
+                                    <div key={j} style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#1e293b",borderRadius:7,padding:"8px 12px",gap:10,flexWrap:"wrap"}}>
+                                      <div style={{fontSize:11,color:"#64748b",display:"flex",gap:12,flexWrap:"wrap"}}>
+                                        <span style={{color:h.source==="scanned"?"#86efac":"#94a3b8"}}>{h.source==="scanned"?"✓ Scanned":"Expected"}</span>
+                                        {h.site      && <span>📍 {h.site}</span>}
+                                        {h.requestor && <span>👤 {h.requestor}</span>}
+                                      </div>
+                                      <button onClick={function(){ setOpenTicketId(h.ticketId); setTab(0); }}
+                                        style={{background:"#1e3a5f",color:"#93c5fd",border:"1px solid #1e40af",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                                        Ticket #{h.ticketNo} →
+                                      </button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                          {/* Vendor audits section */}
+                          {g.shipments.length>0 && (
+                            <div>
+                              <div style={{fontSize:11,color:"#475569",textTransform:"uppercase",letterSpacing:0.7,marginBottom:6}}>🚛 Vendor Audits ({g.shipments.length})</div>
+                              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                                {g.shipments.map(function(h,j){
+                                  return (
+                                    <div key={j} style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#1e293b",borderRadius:7,padding:"8px 12px",gap:10,flexWrap:"wrap"}}>
+                                      <div style={{fontSize:11,color:"#64748b",display:"flex",gap:12,flexWrap:"wrap"}}>
+                                        {h.vendor   && <span>🏢 {h.vendor}</span>}
+                                        {h.fileName && <span>📄 {h.fileName}</span>}
+                                      </div>
+                                      <button onClick={function(){ setOpenShipmentId(h.shipmentId); setTab(2); }}
+                                        style={{background:"#052e16",color:"#86efac",border:"1px solid #166534",borderRadius:6,padding:"4px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                                        Pickup {h.shipmentName} →
+                                      </button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </div>
 
       {/* Run button + summary */}
       <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"18px 22px",marginBottom:20,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12}}>
