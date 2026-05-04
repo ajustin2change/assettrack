@@ -2033,6 +2033,22 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
     });
   }
 
+  function suggestPickupDate(siteName){
+    if(form.scheduledPickupDate) return;
+    var loc = (locations||[]).find(function(l){ return l.name===siteName; });
+    if(!loc || !loc.campus) return;
+    var targetDay = loc.campus==="HC" ? 2 : 4;
+    var d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()+1);
+    var tries = 0;
+    while(d.getDay()!==targetDay && tries<14){ d.setDate(d.getDate()+1); tries++; }
+    for(var weeks=0; weeks<8; weeks++){
+      var dateStr = localDateStr(d);
+      var count = (tickets||[]).filter(function(t){ return t.scheduledPickupDate===dateStr && t.id!==form.id; }).length;
+      if(count<6){ setF("scheduledPickupDate", dateStr); return; }
+      d.setDate(d.getDate()+7);
+    }
+  }
+
   function handleSave(){
     if(!form.ticketNo.trim()){ alert("Please enter a Ticket Number."); return; }
     // Warn if scheduled date is over capacity
@@ -2146,27 +2162,6 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
               if(fromTicket) setF("phone", fromTicket.phone);
             }
 
-            function suggestPickupDate(siteName){
-              // Only fill when scheduledPickupDate is currently blank
-              if(form.scheduledPickupDate) return;
-              var loc = (locations||[]).find(function(l){ return l.name===siteName; });
-              if(!loc || !loc.campus) return;
-              var targetDay = loc.campus==="HC" ? 2 : 4; // 2=Tuesday, 4=Thursday
-              // Find next occurrence of that day
-              var d = new Date();
-              d.setHours(0,0,0,0);
-              // Start from tomorrow so today is never suggested
-              d.setDate(d.getDate()+1);
-              var tries = 0;
-              while(d.getDay()!==targetDay && tries<14){ d.setDate(d.getDate()+1); tries++; }
-              // Check load — skip weeks until under 6
-              for(var weeks=0; weeks<8; weeks++){
-                var dateStr = localDateStr(d);
-                var count = (tickets||[]).filter(function(t){ return t.scheduledPickupDate===dateStr && t.id!==form.id; }).length;
-                if(count<6){ setF("scheduledPickupDate", dateStr); return; }
-                d.setDate(d.getDate()+7);
-              }
-            }
             return (
               <div>
                 <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Requestor</label>
