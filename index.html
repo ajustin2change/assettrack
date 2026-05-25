@@ -2051,6 +2051,10 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
 
   function handleSave(){
     if(!form.ticketNo.trim()){ alert("Please enter a Ticket Number."); return; }
+    // Block duplicate ticket numbers
+    var normTkt = function(s){ var t=(s||"").trim(); if(!t) return ""; return /^\d+$/.test(t)?String(parseInt(t,10)):t.toUpperCase(); };
+    var dup = (tickets||[]).find(function(t){ return t.id!==form.id && normTkt(t.ticketNo)===normTkt(form.ticketNo); });
+    if(dup){ alert("Ticket number \""+form.ticketNo+"\" is already used by another ticket. Please use a unique number."); return; }
     // Warn if scheduled date is over capacity
     if(form.scheduledPickupDate){
       var spd = form.scheduledPickupDate;
@@ -2079,11 +2083,25 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
       <div style={{background:"#1e293b", borderRadius:12, border:"1px solid #334155", padding:"20px 24px", marginBottom:20}}>
         <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:16}}>
           {/* Ticket Number */}
-          <div>
-            <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Ticket Number *</label>
-            <input type="text" value={form.ticketNo} onChange={function(e){ setF("ticketNo",e.target.value); }} placeholder="e.g. TKT-2026-001"
-              style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}/>
-          </div>
+          {(function(){
+            function normTkt(s){ var t=(s||"").trim(); if(!t) return ""; return /^\d+$/.test(t)?String(parseInt(t,10)):t.toUpperCase(); }
+            var typed = (form.ticketNo||"").trim();
+            var dup = typed ? (tickets||[]).find(function(t){ return t.id!==form.id && normTkt(t.ticketNo)===normTkt(typed); }) : null;
+            return (
+              <div>
+                <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Ticket Number *</label>
+                <input type="text" value={form.ticketNo} onChange={function(e){ setF("ticketNo",e.target.value); }} placeholder="e.g. TKT-2026-001"
+                  style={{width:"100%",background:"#0f172a",border:"1px solid "+(dup?"#7f1d1d":"#334155"),borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}/>
+                {dup && (
+                  <div style={{marginTop:4,fontSize:11,color:"#fca5a5",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                    <span>⚠ Already used —</span>
+                    <button type="button" onClick={function(){ if(confirm("Discard current changes and open ticket #"+dup.ticketNo+"?")) onCancel(); }}
+                      style={{background:"none",border:"none",color:"#93c5fd",cursor:"pointer",fontSize:11,fontFamily:"inherit",padding:0,textDecoration:"underline"}}>view existing ticket →</button>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {/* Date Submitted */}
           <div>
             <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Date Submitted</label>
