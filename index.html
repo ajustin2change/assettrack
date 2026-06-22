@@ -4200,17 +4200,32 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
     }
 
     // Build a serial lookup that also indexes by numeric value for pure-digit serials
-    var vendorBySerialNorm = {}; // normalized (leading-zero-stripped if numeric) -> original key
+    // (so an Excel-stripped leading zero, "00832" vs "832", still matches). But distinct
+    // serials can collapse to the same numeric key; the old code did norm->serial last-wins,
+    // which silently dropped a vendor row (one false MISSING + one false EXTRA, no signal).
+    // Now: index norm -> [all serials], use the numeric path ONLY when it's unambiguous,
+    // and collect collisions so the run can flag them instead of guessing.
+    var vendorByNormList = {}; // normalized numeric key -> [original serial keys]
+    var serialCollisions = []; // numeric keys claimed by 2+ distinct vendor serials
     Object.keys(vendorBySerial).forEach(function(s){
-      var norm = /^\d+$/.test(s) ? String(parseInt(s,10)) : s;
-      vendorBySerialNorm[norm] = s;
+      if(!/^\d+$/.test(s)) return; // only pure-digit serials normalize
+      var norm = String(parseInt(s,10));
+      (vendorByNormList[norm] = vendorByNormList[norm] || []).push(s);
+    });
+    Object.keys(vendorByNormList).forEach(function(norm){
+      if(vendorByNormList[norm].length > 1) serialCollisions.push({norm:norm, serials:vendorByNormList[norm].slice()});
     });
 
     function findVendorRow(serial){
       var su = serial.toUpperCase();
+      // 1. Exact match always wins and is never ambiguous.
       if(vendorBySerial[su]) return {key:su, row:vendorBySerial[su]};
-      var norm = /^\d+$/.test(su) ? String(parseInt(su,10)) : su;
-      if(vendorBySerialNorm[norm]) return {key:vendorBySerialNorm[norm], row:vendorBySerial[vendorBySerialNorm[norm]]};
+      // 2. Numeric-flex match only when exactly one vendor serial owns this numeric
+      //    value. If two collide we refuse to guess and fall through (exact-only).
+      if(/^\d+$/.test(su)){
+        var hits = vendorByNormList[String(parseInt(su,10))] || [];
+        if(hits.length === 1) return {key:hits[0], row:vendorBySerial[hits[0]]};
+      }
       return null;
     }
 
@@ -4300,6 +4315,7 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
     var result = {
       matched, tagMismatch, missingFromVendor, extraFromVendor, placeholders,
       crossTicketMatches, duplicateAuditMatches,
+      serialCollisions,
       vendorSerials: Object.keys(vendorBySerial), // stored for future cross-audit checks
       pickupNo:  pickup.name,
       poNumber:  po,
@@ -4366,6 +4382,14 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
       {/* Results */}
       {report && (
         <div>
+          {report.serialCollisions && report.serialCollisions.length > 0 && (
+            <div style={{background:"#7f1d1d22",border:"1px solid #fca5a5",borderRadius:8,padding:"10px 12px",marginBottom:14,fontSize:12,color:"#fecaca"}}>
+              <strong style={{color:"#fca5a5"}}>{"\u26A0 Ambiguous serials in vendor file ("+report.serialCollisions.length+")."}</strong>{" Two or more vendor serials share the same numeric value (e.g. a stripped leading zero), so a numeric match can't be trusted for them. Any of these were matched by EXACT serial only \u2014 verify by hand:"}
+              <div style={{marginTop:6,fontFamily:"'Geist Mono',monospace",color:"#fda4af"}}>
+                {report.serialCollisions.map(function(c){ return c.serials.join("  \u00B7  "); }).join("     |     ")}
+              </div>
+            </div>
+          )}
           <div style={{fontSize:11,color:"#475569",marginBottom:16}}>Generated {report.generatedAt} · {report.vendorTotal} vendor serials · {report.ourTotal} our assets</div>
 
           {/* ── Export + actions ── */}
