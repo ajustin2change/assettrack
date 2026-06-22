@@ -23,6 +23,34 @@
 });
     var db   = firebase.firestore();
     var auth = firebase.auth();
+
+    // -- Data-access repository (the swap seam) ------------------------------
+    // The ONLY code that knows the backend is Firestore. Moving to the REST
+    // backend later = reimplement this one object; nothing else changes.
+    function repoDocToObj(d){ return Object.assign({}, d.data(), { id: d.id }); }
+    function repoSnapToList(snap){ return snap.docs.map(repoDocToObj); }
+    function repoSet(coll, data){
+      var clean = JSON.parse(JSON.stringify(data)); // Firestore: strip undefined/functions
+      return db.collection(coll).doc(data.id).set(clean);
+    }
+    var repo = {
+      subscribeTickets:    function(cb){ return db.collection("tickets").orderBy("ticketNo").onSnapshot(function(s){ cb(repoSnapToList(s)); }); },
+      subscribeShipments:  function(cb){ return db.collection("shipments").onSnapshot(function(s){ cb(repoSnapToList(s)); }); },
+      subscribeLocations:  function(cb){ return db.collection("locations").onSnapshot(function(s){ cb(repoSnapToList(s)); }); },
+      subscribeRequestors: function(cb){ return db.collection("requestors").onSnapshot(function(s){ cb(repoSnapToList(s)); }); },
+      getTickets:    function(){ return db.collection("tickets").orderBy("ticketNo").get().then(repoSnapToList); },
+      getShipments:  function(){ return db.collection("shipments").get().then(repoSnapToList); },
+      getLocations:  function(){ return db.collection("locations").get().then(repoSnapToList); },
+      getRequestors: function(){ return db.collection("requestors").get().then(repoSnapToList); },
+      saveTicket:    function(t){  return repoSet("tickets", t); },
+      saveShipment:  function(sh){ return repoSet("shipments", sh); },
+      saveLocation:  function(l){  return repoSet("locations", l); },
+      saveRequestor: function(r){  return repoSet("requestors", r); },
+      deleteTicket:    function(id){ return db.collection("tickets").doc(id).delete(); },
+      deleteShipment:  function(id){ return db.collection("shipments").doc(id).delete(); },
+      deleteLocation:  function(id){ return db.collection("locations").doc(id).delete(); },
+      deleteRequestor: function(id){ return db.collection("requestors").doc(id).delete(); }
+    };
   </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
@@ -539,8 +567,13 @@ function App(){
   const [importMsg, setImportMsg]   = useState(null);
   const [fileHandle, setFileHandle] = useState(null);
   const [saveStatus, setSaveStatus] = useState("idle");
+  const [writeError, setWriteError] = useState(null); // a Firestore write/delete FAILED — data did NOT save
   const [user, setUser]             = useState(null);   // Firebase auth user
   const userRef                     = React.useRef(null); // always-current user for closures
+  const ticketsRef    = useRef([]);    // mirrors latest tickets (prev for upsert diffing, outside the updater)
+  const shipmentsRef  = useRef([]);
+  const locationsRef  = useRef([]);
+  const requestorsRef = useRef([]);
   const [fbLoading, setFbLoading]   = useState(true);   // initial Firestore load
   const jsonRef         = useRef();
   const saveTimer       = useRef(null);
@@ -561,90 +594,82 @@ function App(){
   useEffect(function(){
     setFbLoading(true);
     var unsubs = [];
-    unsubs.push(db.collection("tickets").orderBy("ticketNo").onSnapshot(function(snap){
-      setTickets(snap.docs.map(function(d){ return {...d.data(), id:d.id}; }));
-      setFbLoading(false);
+    unsubs.push(repo.subscribeTickets(function(list){
+      ticketsRef.current = list; setTickets(list); setFbLoading(false);
     }));
-    unsubs.push(db.collection("shipments").onSnapshot(function(snap){
-      setShipments(snap.docs.map(function(d){ return {...d.data(), id:d.id}; }));
+    unsubs.push(repo.subscribeShipments(function(list){
+      shipmentsRef.current = list; setShipments(list);
     }));
-    unsubs.push(db.collection("locations").onSnapshot(function(snap){
-      setLocations(snap.docs.map(function(d){ return {...d.data(), id:d.id}; }));
+    unsubs.push(repo.subscribeLocations(function(list){
+      locationsRef.current = list; setLocations(list);
     }));
-    unsubs.push(db.collection("requestors").onSnapshot(function(snap){
-      setRequestors(snap.docs.map(function(d){ return {...d.data(), id:d.id}; }));
+    unsubs.push(repo.subscribeRequestors(function(list){
+      requestorsRef.current = list; setRequestors(list);
     }));
     return function(){ unsubs.forEach(function(u){ u(); }); };
   }, []);
 
-  // ── Firestore write helpers ───────────────────────────────────
-  function fbSet(collection, id, data){
-    if(!userRef.current) { console.warn("fbSet skipped — not signed in"); return; }
-    var clean = JSON.parse(JSON.stringify(data));
-    db.collection(collection).doc(id).set(clean).catch(function(e){ console.error("Firestore write error:", e); });
+  // -- Persistence (calls repo.* only; never Firestore directly) --
+  function reportWriteError(op, coll, id, e){
+    console.error("Firestore "+op+" error:", e);
+    setWriteError({ collection: coll, id: id, op: op, message: (e && e.message) || String(e) });
   }
-  function fbDelete(collection, id){
-    if(!userRef.current) return;
-    db.collection(collection).doc(id).delete().catch(function(e){ console.error("Firestore delete error:", e); });
-  }
-
-  // Wrap setTickets/setShipments/setLocations/setRequestors to also write Firestore
-  function saveTickets(updaterOrArray){
-    setTickets(function(prev){
-      var next = typeof updaterOrArray === "function" ? updaterOrArray(prev) : updaterOrArray;
-      if(!userRef.current) return next;
-      // Diff and write changed/added items
-      next.forEach(function(t){
-        var old = prev.find(function(x){ return x.id===t.id; });
-        if(!old || JSON.stringify(old) !== JSON.stringify(t)) fbSet("tickets", t.id, t);
-      });
-      prev.forEach(function(t){
-        if(!next.find(function(x){ return x.id===t.id; })) fbDelete("tickets", t.id);
-      });
-      return next;
+  // UPSERT-ONLY: writes changed/added items, NEVER deletes. Deletion is
+  // explicit (remove* below), so a filtered/subset array can no longer
+  // silently mass-delete. Runs OUTSIDE the React updater (uses *Ref.current
+  // as prev) so a double-invoked updater cannot double-write.
+  function upsertList(prev, next, save, coll){
+    next.forEach(function(item){
+      var old = prev.find(function(x){ return x.id===item.id; });
+      if(!old || JSON.stringify(old) !== JSON.stringify(item)){
+        save(item).catch(function(e){ reportWriteError("save", coll, item.id, e); });
+      }
     });
+  }
+  function saveTickets(updaterOrArray){
+    var prev = ticketsRef.current || [];
+    var next = typeof updaterOrArray==="function" ? updaterOrArray(prev) : updaterOrArray;
+    ticketsRef.current = next; setTickets(next);
+    if(userRef.current) upsertList(prev, next, repo.saveTicket, "tickets");
   }
   function saveShipments(updaterOrArray){
-    setShipments(function(prev){
-      var next = typeof updaterOrArray === "function" ? updaterOrArray(prev) : updaterOrArray;
-      if(!userRef.current) return next;
-      next.forEach(function(s){
-        var old = prev.find(function(x){ return x.id===s.id; });
-        if(!old || JSON.stringify(old) !== JSON.stringify(s)) fbSet("shipments", s.id, s);
-      });
-      prev.forEach(function(s){
-        if(!next.find(function(x){ return x.id===s.id; })) fbDelete("shipments", s.id);
-      });
-      return next;
-    });
+    var prev = shipmentsRef.current || [];
+    var next = typeof updaterOrArray==="function" ? updaterOrArray(prev) : updaterOrArray;
+    shipmentsRef.current = next; setShipments(next);
+    if(userRef.current) upsertList(prev, next, repo.saveShipment, "shipments");
   }
   function saveLocations(updaterOrArray){
-    setLocations(function(prev){
-      var next = typeof updaterOrArray === "function" ? updaterOrArray(prev) : updaterOrArray;
-      if(!userRef.current) return next;
-      next.forEach(function(l){
-        var old = prev.find(function(x){ return x.id===l.id; });
-        if(!old || JSON.stringify(old) !== JSON.stringify(l)) fbSet("locations", l.id, l);
-      });
-      prev.forEach(function(l){
-        if(!next.find(function(x){ return x.id===l.id; })) fbDelete("locations", l.id);
-      });
-      return next;
-    });
+    var prev = locationsRef.current || [];
+    var next = typeof updaterOrArray==="function" ? updaterOrArray(prev) : updaterOrArray;
+    locationsRef.current = next; setLocations(next);
+    if(userRef.current) upsertList(prev, next, repo.saveLocation, "locations");
   }
   function saveRequestors(updaterOrArray){
-    setRequestors(function(prev){
-      var next = typeof updaterOrArray === "function" ? updaterOrArray(prev) : updaterOrArray;
-      if(!userRef.current) return next;
-      next.forEach(function(r){
-        var old = prev.find(function(x){ return x.id===r.id; });
-        if(!old || JSON.stringify(old) !== JSON.stringify(r)) fbSet("requestors", r.id, r);
-      });
-      prev.forEach(function(r){
-        if(!next.find(function(x){ return x.id===r.id; })) fbDelete("requestors", r.id);
-      });
-      return next;
-    });
+    var prev = requestorsRef.current || [];
+    var next = typeof updaterOrArray==="function" ? updaterOrArray(prev) : updaterOrArray;
+    requestorsRef.current = next; setRequestors(next);
+    if(userRef.current) upsertList(prev, next, repo.saveRequestor, "requestors");
+  }
+  // Explicit deletes -- the ONLY path that removes a record from the DB.
+  function removeTicket(id){
+    ticketsRef.current = (ticketsRef.current||[]).filter(function(x){ return x.id!==id; });
+    setTickets(ticketsRef.current);
+    if(userRef.current) repo.deleteTicket(id).catch(function(e){ reportWriteError("delete","tickets",id,e); });
+  }
+  function removeShipment(id){
+    shipmentsRef.current = (shipmentsRef.current||[]).filter(function(x){ return x.id!==id; });
+    setShipments(shipmentsRef.current);
+    if(userRef.current) repo.deleteShipment(id).catch(function(e){ reportWriteError("delete","shipments",id,e); });
+  }
+  function removeLocation(id){
+    locationsRef.current = (locationsRef.current||[]).filter(function(x){ return x.id!==id; });
+    setLocations(locationsRef.current);
+    if(userRef.current) repo.deleteLocation(id).catch(function(e){ reportWriteError("delete","locations",id,e); });
+  }
+  function removeRequestor(id){
+    requestorsRef.current = (requestorsRef.current||[]).filter(function(x){ return x.id!==id; });
+    setRequestors(requestorsRef.current);
+    if(userRef.current) repo.deleteRequestor(id).catch(function(e){ reportWriteError("delete","requestors",id,e); });
   }
 
   // Auto-save session file (still supported for offline backup)
@@ -660,12 +685,19 @@ function App(){
     return function(){ clearTimeout(saveTimer.current); };
   }, [tickets, shipments, fileHandle]);
 
+  // Whole-session loads (FSA open/new, legacy load, push) go through here so
+  // state and refs are set together and the refs never drift from React state.
+  function hydrateAll(next){
+    if(next.tickets){    ticketsRef.current = next.tickets;       setTickets(next.tickets); }
+    if(next.shipments){  shipmentsRef.current = next.shipments;   setShipments(next.shipments); }
+    if(next.locations){  locationsRef.current = next.locations;   setLocations(next.locations); }
+    if(next.requestors){ requestorsRef.current = next.requestors; setRequestors(next.requestors); }
+  }
   async function handleFSAOpen(){
     try {
       const result = await fsaPickOpenFile();
       setFileHandle(result.fileHandle);
-      setTickets(result.tickets);
-      setShipments(result.shipments);
+      hydrateAll({tickets: result.tickets, shipments: result.shipments});
       setVendorReport(null);
       setSaveStatus("idle");
       setImportMsg({ok:true, text:`Opened "${result.fileHandle.name}" — ${result.tickets.length} ticket(s). Changes will auto-save.`});
@@ -683,7 +715,7 @@ function App(){
       const fh = await fsaPickSaveFile();
       if(!fh) return;
       setFileHandle(fh);
-      setTickets([]); setShipments([]); setVendorReport(null); setSaveStatus("idle");
+      hydrateAll({tickets: [], shipments: []}); setVendorReport(null); setSaveStatus("idle");
       setImportMsg({ok:true, text:`New session file created. All changes will auto-save to "${fh.name}".`});
       setTimeout(function(){ setImportMsg(null); }, 7000);
     } catch(e){
@@ -697,16 +729,13 @@ function App(){
       setTimeout(function(){ setImportMsg(null); }, 5000);
       return;
     }
-    // Write directly via fbSet bypassing the diff logic
-    (s.tickets||[]).forEach(function(t){ fbSet("tickets", t.id, t); });
-    (s.shipments||[]).forEach(function(sh){ fbSet("shipments", sh.id, sh); });
-    (s.locations||[]).forEach(function(l){ fbSet("locations", l.id, l); });
-    (s.requestors||[]).forEach(function(r){ fbSet("requestors", r.id, r); });
-    // Also update local state
-    setTickets(s.tickets||[]);
-    setShipments(s.shipments||[]);
-    setLocations(s.locations||[]);
-    setRequestors(s.requestors||[]);
+    // Bulk push via the repository (writes everything; never deletes).
+    (s.tickets||[]).forEach(function(t){ repo.saveTicket(t).catch(function(e){ reportWriteError("save","tickets",t.id,e); }); });
+    (s.shipments||[]).forEach(function(sh){ repo.saveShipment(sh).catch(function(e){ reportWriteError("save","shipments",sh.id,e); }); });
+    (s.locations||[]).forEach(function(l){ repo.saveLocation(l).catch(function(e){ reportWriteError("save","locations",l.id,e); }); });
+    (s.requestors||[]).forEach(function(r){ repo.saveRequestor(r).catch(function(e){ reportWriteError("save","requestors",r.id,e); }); });
+    // Also update local state + refs
+    hydrateAll({tickets: s.tickets||[], shipments: s.shipments||[], locations: s.locations||[], requestors: s.requestors||[]});
     setImportMsg({ok:true, text:"Pushed "+(s.tickets||[]).length+" tickets to Firestore."});
     setTimeout(function(){ setImportMsg(null); }, 6000);
     setPendingSession(null);
@@ -725,7 +754,7 @@ function App(){
           pushToFirestore(s);
         } else {
           // Load into local state only — show push button
-          setTickets(s.tickets||[]); setShipments(s.shipments||[]); setLocations(s.locations||[]); setRequestors(s.requestors||[]);
+          hydrateAll({tickets: s.tickets||[], shipments: s.shipments||[], locations: s.locations||[], requestors: s.requestors||[]});
           setImportMsg({ok:true, text:"Loaded "+s.tickets.length+" ticket(s). Sign in then click \"Push to Firestore\" to save."});
         }
       } catch(err){
@@ -784,6 +813,12 @@ function App(){
             <button onClick={function(){ setShowSettings(true); }}
               style={{background:"#1e293b",color:"#64748b",border:"1px solid #334155",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:16,lineHeight:1}} title="Settings">⚙</button>
           </div>
+          {writeError && (
+            <div style={{margin:"8px 0",padding:"10px 14px",borderRadius:6,fontSize:12,background:"#450a0a",color:"#fca5a5",border:"1px solid #7f1d1d",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+              <span>{"\u26A0 A change did NOT save to the database ("+writeError.collection+"/"+writeError.id+", "+writeError.op+"). Your latest edit may be lost on refresh \u2014 check your connection or sign-in and re-apply it. Error: "+writeError.message}</span>
+              <button onClick={function(){ setWriteError(null); }} style={{background:"#7f1d1d",color:"#fecaca",border:"1px solid #b91c1c",borderRadius:5,padding:"4px 10px",cursor:"pointer",fontSize:11,whiteSpace:"nowrap"}}>Dismiss</button>
+            </div>
+          )}
           {importMsg && (
             <div style={{margin:"8px 0",padding:"8px 14px",borderRadius:6,fontSize:12,background:importMsg.ok?"#052e16":"#450a0a",color:importMsg.ok?"#86efac":"#fca5a5",border:`1px solid ${importMsg.ok?"#166534":"#7f1d1d"}`}}>
               {importMsg.ok?"✓ ":"✗ "}{importMsg.text}
@@ -812,10 +847,10 @@ function App(){
       </div>
 
       <div style={{maxWidth:1020, margin:"32px auto 0", padding:"0 24px"}}>
-        {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} tickets={tickets} shipments={shipments} onClose={function(){ setShowSettings(false); }} readOnly={!user}/>}
-        {!showSettings && tab===0 && <TicketsTab tickets={tickets} setTickets={saveTickets} setVendorReport={setVendorReport} setTab={setTab} openTicketId={openTicketId} setOpenTicketId={setOpenTicketId} locations={locations} requestors={requestors} readOnly={!user}/>}
+        {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} tickets={tickets} shipments={shipments} onClose={function(){ setShowSettings(false); }} readOnly={!user} onDeleteLocation={removeLocation} onDeleteRequestor={removeRequestor}/>}
+        {!showSettings && tab===0 && <TicketsTab tickets={tickets} setTickets={saveTickets} setVendorReport={setVendorReport} setTab={setTab} openTicketId={openTicketId} setOpenTicketId={setOpenTicketId} locations={locations} requestors={requestors} readOnly={!user} onDeleteTicket={removeTicket}/>}
         {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user} routeOrder={routeOrder} setRouteOrder={setRouteOrder}/>}
-        {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user} openShipmentId={openShipmentId} setOpenShipmentId={setOpenShipmentId}/>}
+        {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user} openShipmentId={openShipmentId} setOpenShipmentId={setOpenShipmentId} onDeleteShipment={removeShipment}/>}
         {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
         {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
         {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId} setOpenShipmentId={setOpenShipmentId}/>}
@@ -827,7 +862,7 @@ function App(){
 // ══════════════════════════════════════════════════════════════════
 // SETTINGS PAGE
 // ══════════════════════════════════════════════════════════════════
-function SettingsPage({locations, setLocations, requestors, setRequestors, tickets, shipments, onClose, readOnly}){
+function SettingsPage({locations, setLocations, requestors, setRequestors, tickets, shipments, onClose, readOnly, onDeleteLocation, onDeleteRequestor}){
   const [section, setSection] = useState("locations");
 
   // ── Locations ────────────────────────────────────────────────────
@@ -845,7 +880,7 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
     setLocForm({name:"",address:""});
   }
   function editLoc(l){ setLocEdit(l.id); setLocForm({name:l.name, address:l.address||"", campus:l.campus||""}); }
-  function delLoc(id){ if(!confirm("Delete this location?")) return; setLocations(function(prev){ return prev.filter(function(l){ return l.id!==id; }); }); if(locEdit===id){ setLocEdit(null); setLocForm({name:"",address:"",campus:""}); } }
+  function delLoc(id){ if(!confirm("Delete this location?")) return; onDeleteLocation(id); if(locEdit===id){ setLocEdit(null); setLocForm({name:"",address:"",campus:""}); } }
 
   // ── Requestors ───────────────────────────────────────────────────
   const [reqForm, setReqForm] = useState({name:"", email:"", phone:"", department:""});
@@ -862,7 +897,7 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
     setReqForm({name:"",email:"",phone:""});
   }
   function editReq(r){ setReqEdit(r.id); setReqForm({name:r.name, email:r.email||"", phone:r.phone||"", department:r.department||""}); }
-  function delReq(id){ if(!confirm("Delete this requestor?")) return; setRequestors(function(prev){ return prev.filter(function(r){ return r.id!==id; }); }); if(reqEdit===id){ setReqEdit(null); setReqForm({name:"",email:"",phone:"",department:""}); } }
+  function delReq(id){ if(!confirm("Delete this requestor?")) return; onDeleteRequestor(id); if(reqEdit===id){ setReqEdit(null); setReqForm({name:"",email:"",phone:"",department:""}); } }
 
   var inputStyle = {width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"};
   var labelStyle = {display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6};
@@ -1313,7 +1348,7 @@ function DataManagementSection({tickets, shipments, locations, setLocations, req
 // ══════════════════════════════════════════════════════════════════
 // TAB 1 — TICKETS
 // ══════════════════════════════════════════════════════════════════
-function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId, setOpenTicketId, locations, requestors, readOnly}){
+function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId, setOpenTicketId, locations, requestors, readOnly, onDeleteTicket}){
   const [view, setView]               = useState("list");
   const [active, setActive]           = useState(null);
   const [importMsg, setImportMsg]     = useState(null);
@@ -1411,7 +1446,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
     setOpenTicketId(null);
   }, [openTicketId]);
   function saveTicket(t){ setTickets(function(prev){ const i=prev.findIndex(function(x){ return x.id===t.id; }); if(i===-1) return [...prev,t]; const n=[...prev]; n[i]=t; return n; }); setVendorReport(null); setView("list"); }
-  function deleteTicket(id){ if(!confirm("Delete this ticket?")) return; setTickets(function(prev){ return prev.filter(function(t){ return t.id!==id; }); }); setVendorReport(null); }
+  function deleteTicket(id){ if(!confirm("Delete this ticket?")) return; onDeleteTicket(id); setVendorReport(null); }
 
 
 
@@ -3525,7 +3560,7 @@ var STATUS_META = {
   "reconciled":   {label:"Reconciled",   color:"#86efac", bg:"#052e16", border:"#166534"},
 };
 
-function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorReport, readOnly, openShipmentId, setOpenShipmentId}){
+function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorReport, readOnly, openShipmentId, setOpenShipmentId, onDeleteShipment}){
   const [view, setView]     = useState("list");
   const [editing, setEditing] = useState(null);
 
@@ -3570,7 +3605,7 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
         return t;
       }); });
     }
-    setShipments(function(prev){ return prev.filter(function(x){ return x.id!==id; }); });
+    onDeleteShipment(id);
     setVendorReport(null);
   }
 
