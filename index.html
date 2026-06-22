@@ -4155,7 +4155,13 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
         }
         var ws = wb.Sheets[sheetName];
         var rows = XLSX.utils.sheet_to_json(ws, {defval:""});
-        setVendorData({rows:rows, po:fnPo, vpNo:fnVp, fileName:file.name});
+        var sampleRow = rows[0] || {};
+        var headers = Object.keys(sampleRow);
+        // Detect columns by NAME only (no positional fallback). A miss is surfaced
+        // in the preview and hard-blocks the run, rather than silently guessing.
+        var serialKey = findCol(sampleRow, "Serial Number") || findCol(sampleRow, "Serial") || findCol(sampleRow, SERIAL_COL) || "";
+        var tagKey    = findCol(sampleRow, "Asset Tag") || findCol(sampleRow, "Asset") || "";
+        setVendorData({rows:rows, po:fnPo, vpNo:fnVp, fileName:file.name, serialKey:serialKey, tagKey:tagKey, headers:headers});
       } catch(err){ alert("Failed to read vendor file: "+err.message); }
     };
     reader.readAsBinaryString(file);
@@ -4168,9 +4174,12 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
     var po   = vendorData.po || poNumber;
 
     // Find columns — vendor audit uses "Serial Number" and "Asset Tag"
-    var sampleRow = rows[0] || {};
-    var serialKey = findCol(sampleRow, "Serial Number") || findCol(sampleRow, "Serial") || findCol(sampleRow, SERIAL_COL) || Object.keys(sampleRow)[8] || "";
-    var tagKey    = findCol(sampleRow, "Asset Tag") || findCol(sampleRow, "Asset") || "";
+    // Columns were detected by name at upload (handleFile) and shown for confirmation.
+    // No positional fallback: if the serial column wasn't found, the Run button never
+    // renders; we guard here too in case this path is reached another way.
+    var serialKey = vendorData.serialKey || "";
+    var tagKey    = vendorData.tagKey || "";
+    if(!serialKey){ alert("No serial-number column detected in the vendor audit. Reconciliation blocked - check the file's header row."); return; }
 
     // Build vendor lookup maps
     var vendorBySerial = {};
@@ -4365,16 +4374,34 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
           {vendorFileName && !readOnly && <div style={{color:"#64748b",fontSize:11,marginTop:3}}>Click to replace</div>}
         </div>
         {vendorData && (
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginTop:10}}>
-            <div style={{fontSize:12,color:"#64748b"}}>
-              {poNumber && <span style={{marginRight:14}}>PO #<strong style={{color:"#f1f5f9"}}>{poNumber}</strong></span>}
-              <span><strong style={{color:"#93c5fd"}}>{vendorData.rows.length}</strong> rows loaded</span>
-              <span style={{margin:"0 8px",color:"#334155"}}>·</span>
-              <span><strong style={{color:"#86efac"}}>{ourAssets.length}</strong> our assets</span>
+          <div style={{marginTop:10}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+              <div style={{fontSize:12,color:"#64748b"}}>
+                {poNumber && <span style={{marginRight:14}}>PO #<strong style={{color:"#f1f5f9"}}>{poNumber}</strong></span>}
+                <span><strong style={{color:"#93c5fd"}}>{vendorData.rows.length}</strong> rows loaded</span>
+                <span style={{margin:"0 8px",color:"#334155"}}>·</span>
+                <span><strong style={{color:"#86efac"}}>{ourAssets.length}</strong> our assets</span>
+              </div>
+              {!readOnly && vendorData.serialKey && <button onClick={runReconciliation} style={{background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",color:"#fff",border:"none",borderRadius:8,padding:"10px 24px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>
+                Run Reconciliation →
+              </button>}
             </div>
-            {!readOnly && <button onClick={runReconciliation} style={{background:"linear-gradient(135deg,#1d4ed8,#7c3aed)",color:"#fff",border:"none",borderRadius:8,padding:"10px 24px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>
-              Run Reconciliation →
-            </button>}
+            {vendorData.serialKey ? (
+              <div style={{marginTop:10,padding:"8px 12px",background:"#06281f",border:"1px solid #15803d",borderRadius:8,fontSize:12,color:"#bbf7d0"}}>
+                <strong style={{color:"#86efac"}}>Detected columns</strong>{" \u2014 confirm before running:"}
+                <div style={{marginTop:4,fontFamily:"'Geist Mono',monospace",color:"#d1fae5"}}>
+                  {"Serial \u2192 "}<strong>{vendorData.serialKey}</strong>
+                  {"      |      Asset Tag \u2192 "}<strong>{vendorData.tagKey || "(none \u2014 tag-mismatch checks skipped)"}</strong>
+                </div>
+              </div>
+            ) : (
+              <div style={{marginTop:10,padding:"8px 12px",background:"#7f1d1d22",border:"1px solid #fca5a5",borderRadius:8,fontSize:12,color:"#fecaca"}}>
+                <strong style={{color:"#fca5a5"}}>{"\u26A0 No serial-number column found \u2014 reconciliation blocked."}</strong>{" The audit's header row has no column matching Serial Number / Serial. Check the file. Columns seen:"}
+                <div style={{marginTop:4,fontFamily:"'Geist Mono',monospace",color:"#fda4af"}}>
+                  {(vendorData.headers||[]).join("  \u00B7  ") || "(no columns read)"}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
