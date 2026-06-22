@@ -590,8 +590,17 @@ function App(){
   function signIn(){  auth.signInWithPopup(new firebase.auth.GoogleAuthProvider()); }
   function signOut(){ auth.signOut(); }
 
-  // ── Firestore: load all collections on mount ─────────────────
+  // -- Firestore: subscribe only while signed in (reads now require auth) --
+  // Gating on `user` is required: rules deny reads when signed out, and
+  // re-running on auth change is what re-subscribes after sign-in.
   useEffect(function(){
+    if(!user){
+      // Signed out: clear the view and do not subscribe (reads are denied).
+      ticketsRef.current=[]; shipmentsRef.current=[]; locationsRef.current=[]; requestorsRef.current=[];
+      setTickets([]); setShipments([]); setLocations([]); setRequestors([]);
+      setFbLoading(false);
+      return;
+    }
     setFbLoading(true);
     var unsubs = [];
     unsubs.push(repo.subscribeTickets(function(list){
@@ -607,7 +616,7 @@ function App(){
       requestorsRef.current = list; setRequestors(list);
     }));
     return function(){ unsubs.forEach(function(u){ u(); }); };
-  }, []);
+  }, [user]);
 
   // -- Persistence (calls repo.* only; never Firestore directly) --
   function reportWriteError(op, coll, id, e){
