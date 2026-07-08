@@ -189,42 +189,41 @@ function findPartialMatch(scanned, expectedList){
   return best;
 }
 
-// ── Identifier extraction + matching (see matcher.js for the tested spec) ──
-var EXACT_AUTO_LEN   = 8;  // shared exact token >= this -> AUTO-ACCEPT (no review)
-var EXACT_REVIEW_LEN = 7;  // shared exact token == this (e.g. Dell tag in a string) -> exact but REVIEW
-var EXACT_MIN_LEN    = EXACT_REVIEW_LEN; // below this, an exact shared token is ignored (coincidence-prone)
-var FUZZY_MIN_LEN    = 6;  // both tokens must be >= this to consider a fuzzy suggestion
+// ── Identifier extraction + matching (tested spec in matcher.js) ──
+var EXACT_AUTO_LEN=8, EXACT_REVIEW_LEN=7, EXACT_MIN_LEN=EXACT_REVIEW_LEN, FUZZY_MIN_LEN=6;
 function extractIdentifiers(str){
-  var up = String(str||"").toUpperCase().trim();
-  if(!up) return [];
-  var cands = {};
-  var whole = up.replace(/[^A-Z0-9]/g, "");
-  if(whole.length >= 2) cands[whole] = true;
-  up.split(/[^A-Z0-9]+/).forEach(function(t){ if(t.length >= 2) cands[t] = true; });
+  var up=String(str||"").toUpperCase().trim(); if(!up) return [];
+  var cands={}; var whole=up.replace(/[^A-Z0-9]/g,""); if(whole.length>=2) cands[whole]=true;
+  up.split(/[^A-Z0-9]+/).forEach(function(t){ if(t.length>=2) cands[t]=true; });
   return Object.keys(cands);
 }
-// Best match of one expected serial against a pool of unmatched scanned serials, or null.
 function bestMatch(expSerial, pool){
-  var expToks = extractIdentifiers(expSerial);
-  var exact = null, fuzzy = null;
+  var expToks=extractIdentifiers(expSerial); var exact=null, fuzzy=null;
   pool.forEach(function(sc){
-    var scToks = extractIdentifiers(sc);
-    expToks.forEach(function(et){
-      scToks.forEach(function(st){
-        if(et === st){
-          if(et.length >= EXACT_MIN_LEN && (!exact || et.length > exact.token.length)) exact = {scanned:sc, token:et};
-        } else if(et.length >= FUZZY_MIN_LEN && st.length >= FUZZY_MIN_LEN){
-          var maxd = (et.length>=10 && st.length>=10) ? 2 : 1;
-          var d = levenshtein(et, st);
-          if(d>=1 && d<=maxd && (!fuzzy || d<fuzzy.distance || (d===fuzzy.distance && (et.length+st.length)>(fuzzy.expTok.length+fuzzy.scTok.length))))
-            fuzzy = {scanned:sc, expTok:et, scTok:st, distance:d};
-        }
-      });
-    });
+    var scToks=extractIdentifiers(sc);
+    expToks.forEach(function(et){ scToks.forEach(function(st){
+      if(et===st){ if(et.length>=EXACT_MIN_LEN && (!exact||et.length>exact.token.length)) exact={scanned:sc,token:et}; }
+      else if(et.length>=FUZZY_MIN_LEN && st.length>=FUZZY_MIN_LEN){
+        var maxd=(et.length>=10&&st.length>=10)?2:1; var d=levenshtein(et,st);
+        if(d>=1&&d<=maxd&&(!fuzzy||d<fuzzy.distance||(d===fuzzy.distance&&(et.length+st.length)>(fuzzy.expTok.length+fuzzy.scTok.length)))) fuzzy={scanned:sc,expTok:et,scTok:st,distance:d};
+      }
+    }); });
   });
   if(exact) return {kind:(exact.token.length>=EXACT_AUTO_LEN)?"exact":"exact-review", scanned:exact.scanned, canonical:exact.token, expToken:exact.token, scanToken:exact.token, distance:0};
   if(fuzzy) return {kind:"fuzzy", scanned:fuzzy.scanned, canonical:fuzzy.scanned, expToken:fuzzy.expTok, scanToken:fuzzy.scTok, distance:fuzzy.distance};
   return null;
+}
+// ── Correction-row visualization (Phase 2b) ──
+function highlightToken(original, token){
+  var orig=String(original||""); var up=orig.toUpperCase(); var t=String(token||"").toUpperCase();
+  var i=t?up.indexOf(t):-1;
+  if(i<0) return <span style={{color:"#94a3b8"}}>{orig}</span>;
+  var dim={color:"#475569",textDecoration:"line-through"}, hi={color:"#f1f5f9",background:"#334155",borderRadius:3,padding:"0 3px"};
+  return <span>{i>0 && <span style={dim}>{orig.slice(0,i)}</span>}<span style={hi}>{orig.slice(i,i+t.length)}</span>{(i+t.length<orig.length) && <span style={dim}>{orig.slice(i+t.length)}</span>}</span>;
+}
+function diffMark(str, ref){
+  var a=String(str||""), b=String(ref||"");
+  return <span>{a.split("").map(function(ch,idx){ var d=ch!==(b.charAt(idx)); return <span key={idx} style={d?{color:"#f87171",fontWeight:700,textDecoration:"underline"}:{color:"#cbd5e1"}}>{ch}</span>; })}</span>;
 }
 
 // Scan all raw rows for item count labels.
@@ -2987,7 +2986,7 @@ function PickupScanForm({ticket, onSave, onBack}){
     const expSet    = new Set(expected.map(function(a){ return a.serial; }));
     const scannedSet= new Set(scanned);
     const matched=[], missing=[], extra=[], partial=[];
-    const consumed = new Set(); // scanned serials claimed by a correction (not extras)
+    const consumed = new Set();
 
     // Row ids are DETERMINISTIC — expected-derived rows keyed by line index,
     // extras keyed by serial (scans are deduped) — so a recompute yields the
@@ -3040,7 +3039,6 @@ function PickupScanForm({ticket, onSave, onBack}){
   }
 
   function setRes(id,val){ setResolutions(function(r){ return {...r, [id]:val}; }); }
-  // Effective decision for a correction: live click > saved > default(exact=accept) > pending.
   function effRes(item){ return resolutions[item.id] || item.resolution || item.defaultResolution || "pending"; }
 
   function getResolved(){
@@ -3093,7 +3091,6 @@ function PickupScanForm({ticket, onSave, onBack}){
       if(p.resolution==="accept"){
         finalAssets.push({serial:p.canonical||p.scannedSerial, ...infoFor(p.expectedSerial), addedAt:now, source:"scan-"+(p.matchKind||"partial")});
       } else {
-        // rejected/pending: expected stays unaccounted (missing); scanned becomes an extra pending approval
         finalAssets.push({serial:p.scannedSerial, manufacturer:"", machineType:"", ouInventory:"", addedAt:now, source:"scan-extra-pending", approved:null});
       }
     });
@@ -3504,7 +3501,7 @@ function PickupScanForm({ticket, onSave, onBack}){
 
           {result.partial.length>0 && (
             <ResultSection title={"🔧 Matches & Corrections ("+result.partial.length+")"} color="#a78bfa" defaultOpen={true}>
-              <div style={{fontSize:12,color:"#94a3b8",marginBottom:12}}>{"Extra text (IMEI, model, etc.) was stripped to match the real identifier. "+result.partial.filter(function(x){ return effRes(x)==="accept"; }).length+" accepted \u00b7 "+result.partial.filter(function(x){ var e=effRes(x); return e!=="accept"&&e!=="reject"; }).length+" to review \u00b7 "+result.partial.filter(function(x){ return effRes(x)==="reject"; }).length+" rejected. Nothing is applied silently \u2014 exact embedded matches are pre-accepted; review/fuzzy need your OK."}</div>
+              <div style={{fontSize:12,color:"#94a3b8",marginBottom:12}}>{"Extra text (IMEI, model, etc.) stripped to match the real identifier. "+result.partial.filter(function(x){ return effRes(x)==="accept"; }).length+" accepted \u00b7 "+result.partial.filter(function(x){ var e=effRes(x); return e!=="accept"&&e!=="reject"; }).length+" to review \u00b7 "+result.partial.filter(function(x){ return effRes(x)==="reject"; }).length+" rejected. Nothing applies silently \u2014 exact embedded matches are pre-accepted; review/fuzzy need your OK."}</div>
               {result.partial.map(function(item){
                 var eff = effRes(item);
                 var accepted = eff==="accept", rejected = eff==="reject";
@@ -3515,9 +3512,10 @@ function PickupScanForm({ticket, onSave, onBack}){
                   <div key={item.id} style={{background:"#1e1040",border:"1px solid "+borderCol,borderRadius:8,padding:"12px 16px",marginBottom:8,opacity:rejected?0.6:1}}>
                     <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
                       <span style={{fontSize:10,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6,color:"#e2e8f0",background:kindBg,borderRadius:4,padding:"3px 8px",whiteSpace:"nowrap"}}>{kindLabel}</span>
-                      <div style={{flex:1,minWidth:130}}>
+                      <div style={{flex:1,minWidth:150}}>
                         <div style={{fontSize:10,color:"#94a3b8",marginBottom:3,textTransform:"uppercase",letterSpacing:0.7}}>Expected (ticket)</div>
-                        <div style={{fontFamily:"'Geist Mono',monospace",fontSize:13,color:"#94a3b8",letterSpacing:1}}>{item.expectedSerial}</div>
+                        <div style={{fontFamily:"'Geist Mono',monospace",fontSize:13,letterSpacing:1}}>{highlightToken(item.expectedSerial, item.expToken)}</div>
+                        {item.matchKind==="fuzzy" && <div style={{fontSize:10,color:"#fcd34d",marginTop:5,fontFamily:"'Geist Mono',monospace"}}>{"scanned: "}{diffMark(item.scanToken, item.expToken)}{" ("+item.distance+" off)"}</div>}
                       </div>
                       <div style={{color:"#6d28d9",fontSize:18}}>{"\u2192"}</div>
                       <div style={{flex:1,minWidth:130}}>
