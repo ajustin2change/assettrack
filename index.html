@@ -2867,7 +2867,8 @@ function PickupScanForm({ticket, onSave, onBack}){
   }
   // Waive from the post-scan results view: add the line and recompute IN PLACE
   // (pass the new set explicitly to avoid a stale closure), so the item moves
-  // Missing -> Waived without discarding the results.
+  // Missing -> Waived without discarding the results — links/resolutions survive
+  // because result-row ids are deterministic (see runComparison).
   function waiveFromResult(idx, serial){
     var target = idx;
     if(target==null && serial!=null){
@@ -2939,33 +2940,58 @@ function PickupScanForm({ticket, onSave, onBack}){
     function removeScan(s){ setScanned(function(prev){ return prev.filter(function(x){ return x!==s; }); }); setResult(null); }
 
   function runComparison(waivedOverride){
-    // Only honor the override if it is really a Set. When this runs as a bare
-    // onClick handler, React passes the CLICK EVENT as the first arg — a truthy
-    // non-Set — which must fall back to state. (Fixed: w.has-is-not-a-function.)
-    const w         = (waivedOverride instanceof Set) ? waivedOverride : waived;
+    // Only honor the override if it is really a Set: as a bare onClick handler,
+    // React passes the CLICK EVENT as the first arg (truthy non-Set) — must
+    // fall back to state. A Set also signals an IN-PLACE recompute (waive from
+    // results): preserve links/resolutions instead of resetting them.
+    const inPlace   = waivedOverride instanceof Set;
+    const w         = inPlace ? waivedOverride : waived;
     const expSet    = new Set(expected.map(function(a){ return a.serial; }));
     const scannedSet= new Set(scanned);
     const matched=[], missing=[], extra=[], partial=[];
 
+    // Row ids are DETERMINISTIC — expected-derived rows keyed by line index,
+    // extras keyed by serial (scans are deduped) — so a recompute yields the
+    // same ids and id-keyed links/resolutions survive by construction.
     expected.forEach(function(a, idx){
       if(w.has(idx)) return; // waived line — skip entirely
       const meta = {manufacturer:a.manufacturer||"", machineType:a.machineType||"", ouInventory:a.ouInventory||""};
       if(scannedSet.has(a.serial)){
-        matched.push({id:uid(), expIdx:idx, serial:a.serial, ...meta, type:"matched"});
+        matched.push({id:"exp:"+idx, expIdx:idx, serial:a.serial, ...meta, type:"matched"});
       } else {
         const pm = findPartialMatch(a.serial, Array.from(scannedSet).filter(function(s){ return !expSet.has(s); }));
-        if(pm) partial.push({id:uid(), expIdx:idx, expectedSerial:a.serial, scannedSerial:pm.serial, distance:pm.distance, ...meta, type:"partial", resolution:null});
-        else   missing.push({id:uid(), expIdx:idx, serial:a.serial, ...meta, type:"missing", resolution:null});
+        if(pm) partial.push({id:"exp:"+idx, expIdx:idx, expectedSerial:a.serial, scannedSerial:pm.serial, distance:pm.distance, ...meta, type:"partial", resolution:null});
+        else   missing.push({id:"exp:"+idx, expIdx:idx, serial:a.serial, ...meta, type:"missing", resolution:null});
       }
     });
 
     const partialScanned = new Set(partial.map(function(p){ return p.scannedSerial; }));
     scanned.forEach(function(serial){
-      if(!expSet.has(serial) && !partialScanned.has(serial)) extra.push({id:uid(), serial, type:"extra", resolution:null});
+      if(!expSet.has(serial) && !partialScanned.has(serial)) extra.push({id:"ext:"+serial, serial, type:"extra", resolution:null});
     });
 
     setResult({matched, missing, extra, partial, waived:Array.from(w), scannedAt:new Date().toLocaleString()});
-    setResolutions({});
+    if(inPlace){
+      // Prune links to pairs whose BOTH ids still exist as missing/extra;
+      // waiving a linked item drops its pair. Keep resolutions for surviving ids.
+      var valid = new Set(missing.map(function(m){ return m.id; }).concat(extra.map(function(e){ return e.id; })).concat(partial.map(function(pp){ return pp.id; })));
+      setLinks(function(prev){
+        var next = {};
+        Object.keys(prev).forEach(function(k){ if(valid.has(k) && valid.has(prev[k])) next[k]=prev[k]; });
+        return next;
+      });
+      setLinkingId(function(prev){ return (prev && valid.has(prev)) ? prev : null; });
+      setResolutions(function(prev){
+        var next = {};
+        Object.keys(prev).forEach(function(k){ if(valid.has(k)) next[k]=prev[k]; });
+        return next;
+      });
+    } else {
+      // Fresh run from the Compare button: original behavior — reset all working state.
+      setResolutions({});
+      setLinks({});
+      setLinkingId(null);
+    }
   }
 
   function setRes(id,val){ setResolutions(function(r){ return {...r, [id]:val}; }); }
