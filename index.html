@@ -2805,7 +2805,15 @@ function PickupScanForm({ticket, onSave, onBack}){
     return r;
   });
   const [waived, setWaived] = useState(function(){
-    if(ticket.pickupResult && ticket.pickupResult.waived) return new Set(ticket.pickupResult.waived);
+    var pr = ticket.pickupResult;
+    // Waive is keyed by LINE INDEX into expectedAssets. New format: pr.waivedLines.
+    // Legacy (serials only): waive every line whose serial was waived.
+    if(pr && pr.waivedLines) return new Set(pr.waivedLines);
+    if(pr && pr.waived){
+      var set = new Set();
+      expected.forEach(function(a,i){ if(pr.waived.indexOf(a.serial)!==-1) set.add(i); });
+      return set;
+    }
     return new Set();
   });
   const [directPickup, setDirectPickup] = useState(false);
@@ -2837,13 +2845,39 @@ function PickupScanForm({ticket, onSave, onBack}){
     });
   }
 
-  function toggleWaive(serial){
+  // A serial is waived FOR RECONCILE only if every expected line with that serial
+  // is waived — so waiving one of a duplicate pair still expects the other.
+  function waivedSerialsFrom(waivedSet){
+    var bySerial = {};
+    expected.forEach(function(a,i){ (bySerial[a.serial]=bySerial[a.serial]||[]).push(i); });
+    var out = [];
+    Object.keys(bySerial).forEach(function(serial){
+      if(bySerial[serial].every(function(i){ return waivedSet.has(i); })) out.push(serial);
+    });
+    return out;
+  }
+  // Keyed by LINE INDEX, not serial, so duplicate serials waive independently.
+  function toggleWaive(idx){
     setWaived(function(prev){
       const next = new Set(prev);
-      if(next.has(serial)) next.delete(serial); else next.add(serial);
+      if(next.has(idx)) next.delete(idx); else next.add(idx);
       return next;
     });
-    setResult(null); // clear results if waived set changes
+    setResult(null); // pre-results waive: clear stale results
+  }
+  // Waive from the post-scan results view: add the line and recompute IN PLACE
+  // (pass the new set explicitly to avoid a stale closure), so the item moves
+  // Missing -> Waived without discarding the results.
+  function waiveFromResult(idx, serial){
+    var target = idx;
+    if(target==null && serial!=null){
+      // Fallback for results saved before expIdx existed: first non-waived line with this serial.
+      for(var i=0;i<expected.length;i++){ if(expected[i].serial===serial && !waived.has(i)){ target=i; break; } }
+    }
+    if(target==null) return;
+    var next = new Set(waived); next.add(target);
+    setWaived(next);
+    runComparison(next);
   }
 
   function addScan(raw){
@@ -2904,20 +2938,21 @@ function PickupScanForm({ticket, onSave, onBack}){
 
     function removeScan(s){ setScanned(function(prev){ return prev.filter(function(x){ return x!==s; }); }); setResult(null); }
 
-  function runComparison(){
+  function runComparison(waivedOverride){
+    const w         = waivedOverride || waived;
     const expSet    = new Set(expected.map(function(a){ return a.serial; }));
     const scannedSet= new Set(scanned);
     const matched=[], missing=[], extra=[], partial=[];
 
-    expected.forEach(function(a){
-      if(waived.has(a.serial)) return; // waived — skip entirely
+    expected.forEach(function(a, idx){
+      if(w.has(idx)) return; // waived line — skip entirely
       const meta = {manufacturer:a.manufacturer||"", machineType:a.machineType||"", ouInventory:a.ouInventory||""};
       if(scannedSet.has(a.serial)){
-        matched.push({id:uid(), serial:a.serial, ...meta, type:"matched"});
+        matched.push({id:uid(), expIdx:idx, serial:a.serial, ...meta, type:"matched"});
       } else {
         const pm = findPartialMatch(a.serial, Array.from(scannedSet).filter(function(s){ return !expSet.has(s); }));
-        if(pm) partial.push({id:uid(), expectedSerial:a.serial, scannedSerial:pm.serial, distance:pm.distance, ...meta, type:"partial", resolution:null});
-        else   missing.push({id:uid(), serial:a.serial, ...meta, type:"missing", resolution:null});
+        if(pm) partial.push({id:uid(), expIdx:idx, expectedSerial:a.serial, scannedSerial:pm.serial, distance:pm.distance, ...meta, type:"partial", resolution:null});
+        else   missing.push({id:uid(), expIdx:idx, serial:a.serial, ...meta, type:"missing", resolution:null});
       }
     });
 
@@ -2926,7 +2961,7 @@ function PickupScanForm({ticket, onSave, onBack}){
       if(!expSet.has(serial) && !partialScanned.has(serial)) extra.push({id:uid(), serial, type:"extra", resolution:null});
     });
 
-    setResult({matched, missing, extra, partial, waived:Array.from(waived), scannedAt:new Date().toLocaleString()});
+    setResult({matched, missing, extra, partial, waived:Array.from(w), scannedAt:new Date().toLocaleString()});
     setResolutions({});
   }
 
@@ -3218,9 +3253,9 @@ function PickupScanForm({ticket, onSave, onBack}){
         );
         window.location.href = "mailto:"+email+"?subject="+subject+"&body="+body;
       }
-      onSave({...ticket, pickupScanned:true, pickupScanList:scanned, pickupResult:{...resolved, waived:Array.from(waived)}, assets:finalAssets, approvalStatus:"awaiting-approval", approvalSentAt:new Date().toLocaleString()});
+      onSave({...ticket, pickupScanned:true, pickupScanList:scanned, pickupResult:{...resolved, waived:waivedSerialsFrom(waived), waivedLines:Array.from(waived)}, assets:finalAssets, approvalStatus:"awaiting-approval", approvalSentAt:new Date().toLocaleString()});
     } else {
-      onSave({...ticket, pickupScanned:true, pickupScanList:scanned, pickupResult:{...resolved, waived:Array.from(waived)}, assets:finalAssets, approvalStatus:undefined});
+      onSave({...ticket, pickupScanned:true, pickupScanList:scanned, pickupResult:{...resolved, waived:waivedSerialsFrom(waived), waivedLines:Array.from(waived)}, assets:finalAssets, approvalStatus:undefined});
     }
     onBack();
   }
@@ -3295,14 +3330,14 @@ function PickupScanForm({ticket, onSave, onBack}){
                 </tr>
               </thead>
               <tbody>
-                {expected.map(function(a){
+                {expected.map(function(a, idx){
                   const isScanned = scanned.includes(a.serial);
-                  const isWaived  = waived.has(a.serial);
+                  const isWaived  = waived.has(idx);
                   const rowBg = isWaived ? "#1a0a2e44" : isScanned ? "#052e1688" : "transparent";
                   const serialColor = isWaived ? "#4c1d95" : isScanned ? "#86efac" : "#e2e8f0";
                   const textDeco = (isWaived || isScanned) ? "line-through" : "none";
                   return (
-                    <tr key={a.serial} style={{borderBottom:"1px solid #0f172a",background:rowBg,transition:"background 0.2s",opacity:isWaived?0.5:1}}>
+                    <tr key={idx} style={{borderBottom:"1px solid #0f172a",background:rowBg,transition:"background 0.2s",opacity:isWaived?0.5:1}}>
                       <td style={{padding:"8px 12px",fontFamily:"'Geist Mono',monospace",letterSpacing:0.8,fontSize:12,textDecoration:textDeco}}>
                         <span style={{color:a.duplicate&&!isWaived&&!isScanned?"#fde047":serialColor}}>{a.serial}</span>
                         {a.duplicate&&<span style={{marginLeft:7,fontSize:10,color:"#a16207",background:"#422006",border:"1px solid #a16207",borderRadius:4,padding:"1px 5px"}}>dup</span>}
@@ -3314,14 +3349,14 @@ function PickupScanForm({ticket, onSave, onBack}){
                         {isWaived ? (
                           <React.Fragment>
                             <span style={{color:"#7c3aed",fontSize:10,marginRight:8}}>⊘ Waived</span>
-                            <button onClick={function(){ toggleWaive(a.serial); }} style={{background:"#2e1065",color:"#c4b5fd",border:"1px solid #7c3aed",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}}>Restore</button>
+                            <button onClick={function(){ toggleWaive(idx); }} style={{background:"#2e1065",color:"#c4b5fd",border:"1px solid #7c3aed",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}}>Restore</button>
                           </React.Fragment>
                         ) : isScanned ? (
                           <span style={{color:"#86efac",fontSize:11}}>✓ Scanned</span>
                         ) : (
                           <React.Fragment>
                             <span style={{color:"#475569",fontSize:11,marginRight:8}}>Pending</span>
-                            <button onClick={function(){ toggleWaive(a.serial); }} style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}} title="Mark as Waived — will not count as missing">Waive</button>
+                            <button onClick={function(){ toggleWaive(idx); }} style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}} title="Mark as Waived — will not count as missing">Waive</button>
                           </React.Fragment>
                         )}
                       </td>
@@ -3436,9 +3471,12 @@ function PickupScanForm({ticket, onSave, onBack}){
                           <button onClick={function(){ unlink(item.id); }} style={{background:"none",border:"1px solid #475569",borderRadius:6,color:"#94a3b8",cursor:"pointer",fontSize:11,padding:"4px 10px",fontFamily:"inherit"}}>Unlink</button>
                         </div>
                       ) : (
-                        <button onClick={function(){ setLinkingId(isLinking?null:item.id); }} style={{background:isLinking?"#1d4ed8":"#0f172a",border:"1px solid "+(isLinking?"#3b82f6":"#334155"),borderRadius:6,color:isLinking?"#fff":"#93c5fd",cursor:"pointer",fontSize:12,padding:"7px 14px",fontFamily:"inherit",fontWeight:500}}>
-                          {isLinking ? "× Cancel Link" : "🔗 Link to Extra"}
-                        </button>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <button onClick={function(){ setLinkingId(isLinking?null:item.id); }} style={{background:isLinking?"#1d4ed8":"#0f172a",border:"1px solid "+(isLinking?"#3b82f6":"#334155"),borderRadius:6,color:isLinking?"#fff":"#93c5fd",cursor:"pointer",fontSize:12,padding:"7px 14px",fontFamily:"inherit",fontWeight:500}}>
+                            {isLinking ? "× Cancel Link" : "🔗 Link to Extra"}
+                          </button>
+                          <button onClick={function(){ waiveFromResult(item.expIdx, item.serial); }} title="Waive — will not count as missing (e.g. an untracked printer or monitor)" style={{background:"#2e1065",border:"1px solid #7c3aed",borderRadius:6,color:"#c4b5fd",cursor:"pointer",fontSize:12,padding:"7px 14px",fontFamily:"inherit",fontWeight:500}}>⊘ Waive</button>
+                        </div>
                       )}
                     </div>
                   </div>
