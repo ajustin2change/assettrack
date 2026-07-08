@@ -189,6 +189,44 @@ function findPartialMatch(scanned, expectedList){
   return best;
 }
 
+// ── Identifier extraction + matching (see matcher.js for the tested spec) ──
+var EXACT_AUTO_LEN   = 8;  // shared exact token >= this -> AUTO-ACCEPT (no review)
+var EXACT_REVIEW_LEN = 7;  // shared exact token == this (e.g. Dell tag in a string) -> exact but REVIEW
+var EXACT_MIN_LEN    = EXACT_REVIEW_LEN; // below this, an exact shared token is ignored (coincidence-prone)
+var FUZZY_MIN_LEN    = 6;  // both tokens must be >= this to consider a fuzzy suggestion
+function extractIdentifiers(str){
+  var up = String(str||"").toUpperCase().trim();
+  if(!up) return [];
+  var cands = {};
+  var whole = up.replace(/[^A-Z0-9]/g, "");
+  if(whole.length >= 2) cands[whole] = true;
+  up.split(/[^A-Z0-9]+/).forEach(function(t){ if(t.length >= 2) cands[t] = true; });
+  return Object.keys(cands);
+}
+// Best match of one expected serial against a pool of unmatched scanned serials, or null.
+function bestMatch(expSerial, pool){
+  var expToks = extractIdentifiers(expSerial);
+  var exact = null, fuzzy = null;
+  pool.forEach(function(sc){
+    var scToks = extractIdentifiers(sc);
+    expToks.forEach(function(et){
+      scToks.forEach(function(st){
+        if(et === st){
+          if(et.length >= EXACT_MIN_LEN && (!exact || et.length > exact.token.length)) exact = {scanned:sc, token:et};
+        } else if(et.length >= FUZZY_MIN_LEN && st.length >= FUZZY_MIN_LEN){
+          var maxd = (et.length>=10 && st.length>=10) ? 2 : 1;
+          var d = levenshtein(et, st);
+          if(d>=1 && d<=maxd && (!fuzzy || d<fuzzy.distance || (d===fuzzy.distance && (et.length+st.length)>(fuzzy.expTok.length+fuzzy.scTok.length))))
+            fuzzy = {scanned:sc, expTok:et, scTok:st, distance:d};
+        }
+      });
+    });
+  });
+  if(exact) return {kind:(exact.token.length>=EXACT_AUTO_LEN)?"exact":"exact-review", scanned:exact.scanned, canonical:exact.token, expToken:exact.token, scanToken:exact.token, distance:0};
+  if(fuzzy) return {kind:"fuzzy", scanned:fuzzy.scanned, canonical:fuzzy.scanned, expToken:fuzzy.expTok, scanToken:fuzzy.scTok, distance:fuzzy.distance};
+  return null;
+}
+
 // Scan all raw rows for item count labels.
 // Handles both single-pair rows (label | value) and
 // double-pair rows (label | value | label | value).
@@ -2949,6 +2987,7 @@ function PickupScanForm({ticket, onSave, onBack}){
     const expSet    = new Set(expected.map(function(a){ return a.serial; }));
     const scannedSet= new Set(scanned);
     const matched=[], missing=[], extra=[], partial=[];
+    const consumed = new Set(); // scanned serials claimed by a correction (not extras)
 
     // Row ids are DETERMINISTIC — expected-derived rows keyed by line index,
     // extras keyed by serial (scans are deduped) — so a recompute yields the
@@ -2959,9 +2998,15 @@ function PickupScanForm({ticket, onSave, onBack}){
       if(scannedSet.has(a.serial)){
         matched.push({id:"exp:"+idx, expIdx:idx, serial:a.serial, ...meta, type:"matched"});
       } else {
-        const pm = findPartialMatch(a.serial, Array.from(scannedSet).filter(function(s){ return !expSet.has(s); }));
-        if(pm) partial.push({id:"exp:"+idx, expIdx:idx, expectedSerial:a.serial, scannedSerial:pm.serial, distance:pm.distance, ...meta, type:"partial", resolution:null});
-        else   missing.push({id:"exp:"+idx, expIdx:idx, serial:a.serial, ...meta, type:"missing", resolution:null});
+        const pool = Array.from(scannedSet).filter(function(s){ return !expSet.has(s) && !consumed.has(s); });
+        const bm = bestMatch(a.serial, pool);
+        if(bm){
+          consumed.add(bm.scanned);
+          partial.push({id:"exp:"+idx, expIdx:idx, expectedSerial:a.serial, scannedSerial:bm.scanned,
+            matchKind:bm.kind, canonical:bm.canonical, expToken:bm.expToken, scanToken:bm.scanToken,
+            distance:bm.distance, ...meta, type:"partial",
+            defaultResolution:(bm.kind==="exact")?"accept":null, resolution:null});
+        } else missing.push({id:"exp:"+idx, expIdx:idx, serial:a.serial, ...meta, type:"missing", resolution:null});
       }
     });
 
@@ -2995,6 +3040,8 @@ function PickupScanForm({ticket, onSave, onBack}){
   }
 
   function setRes(id,val){ setResolutions(function(r){ return {...r, [id]:val}; }); }
+  // Effective decision for a correction: live click > saved > default(exact=accept) > pending.
+  function effRes(item){ return resolutions[item.id] || item.resolution || item.defaultResolution || "pending"; }
 
   function getResolved(){
     if(!result) return null;
@@ -3006,7 +3053,7 @@ function PickupScanForm({ticket, onSave, onBack}){
       var linkedMissingId = links[item.id];
       return {...item, linkedTo: linkedMissingId||null, resolution: linkedMissingId ? "linked" : null};
     });
-    var partial = result.partial.map(function(item){ return {...item, resolution:"use-scanned"}; });
+    var partial = result.partial.map(function(item){ return {...item, resolution: effRes(item)}; });
     return {...result, missing:missing, extra:extra, partial:partial};
   }
 
@@ -3043,7 +3090,12 @@ function PickupScanForm({ticket, onSave, onBack}){
     resolved.matched.forEach(function(m){ finalAssets.push({serial:m.serial, ...infoFor(m.serial), addedAt:now, source:"scan"}); });
     // Partial matches — use scanned serial (scanner is authoritative)
     resolved.partial.forEach(function(p){
-      finalAssets.push({serial:p.scannedSerial, ...infoFor(p.expectedSerial), addedAt:now, source:"scan-partial"});
+      if(p.resolution==="accept"){
+        finalAssets.push({serial:p.canonical||p.scannedSerial, ...infoFor(p.expectedSerial), addedAt:now, source:"scan-"+(p.matchKind||"partial")});
+      } else {
+        // rejected/pending: expected stays unaccounted (missing); scanned becomes an extra pending approval
+        finalAssets.push({serial:p.scannedSerial, manufacturer:"", machineType:"", ouInventory:"", addedAt:now, source:"scan-extra-pending", approved:null});
+      }
     });
     // Linked pairs — use scanned (extra) serial as the correct one, borrow metadata from expected
     resolved.extra.forEach(function(e){
@@ -3451,22 +3503,31 @@ function PickupScanForm({ticket, onSave, onBack}){
           )}
 
           {result.partial.length>0 && (
-            <ResultSection title={"🔧 Proposed Corrections — Auto-detected ("+result.partial.length+")"} color="#a78bfa" defaultOpen={true}>
-              <div style={{fontSize:12,color:"#94a3b8",marginBottom:12}}>Scanned serial is close but not identical to expected. The scanned version will be used as correct. These will be sent to the requestor for approval.</div>
+            <ResultSection title={"🔧 Matches & Corrections ("+result.partial.length+")"} color="#a78bfa" defaultOpen={true}>
+              <div style={{fontSize:12,color:"#94a3b8",marginBottom:12}}>{"Extra text (IMEI, model, etc.) was stripped to match the real identifier. "+result.partial.filter(function(x){ return effRes(x)==="accept"; }).length+" accepted \u00b7 "+result.partial.filter(function(x){ var e=effRes(x); return e!=="accept"&&e!=="reject"; }).length+" to review \u00b7 "+result.partial.filter(function(x){ return effRes(x)==="reject"; }).length+" rejected. Nothing is applied silently \u2014 exact embedded matches are pre-accepted; review/fuzzy need your OK."}</div>
               {result.partial.map(function(item){
+                var eff = effRes(item);
+                var accepted = eff==="accept", rejected = eff==="reject";
+                var kindLabel = item.matchKind==="exact" ? "embedded \u00b7 exact" : item.matchKind==="exact-review" ? "embedded \u00b7 review" : ("fuzzy \u00b7 "+item.distance+" off");
+                var kindBg = item.matchKind==="exact" ? "#065f46" : item.matchKind==="exact-review" ? "#78350f" : "#4c1d95";
+                var borderCol = accepted ? "#10b98166" : rejected ? "#7f1d1d" : "#a78bfa44";
                 return (
-                  <div key={item.id} style={{background:"#1e1040",border:"1px solid #a78bfa44",borderRadius:8,padding:"12px 16px",marginBottom:8}}>
-                    <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center"}}>
-                      <div style={{flex:1}}>
+                  <div key={item.id} style={{background:"#1e1040",border:"1px solid "+borderCol,borderRadius:8,padding:"12px 16px",marginBottom:8,opacity:rejected?0.6:1}}>
+                    <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
+                      <span style={{fontSize:10,fontWeight:600,textTransform:"uppercase",letterSpacing:0.6,color:"#e2e8f0",background:kindBg,borderRadius:4,padding:"3px 8px",whiteSpace:"nowrap"}}>{kindLabel}</span>
+                      <div style={{flex:1,minWidth:130}}>
                         <div style={{fontSize:10,color:"#94a3b8",marginBottom:3,textTransform:"uppercase",letterSpacing:0.7}}>Expected (ticket)</div>
-                        <div style={{fontFamily:"'Geist Mono',monospace",fontSize:14,color:"#fca5a5",letterSpacing:1.2,textDecoration:"line-through"}}>{item.expectedSerial}</div>
+                        <div style={{fontFamily:"'Geist Mono',monospace",fontSize:13,color:"#94a3b8",letterSpacing:1}}>{item.expectedSerial}</div>
                       </div>
-                      <div style={{color:"#6d28d9",fontSize:18}}>→</div>
-                      <div style={{flex:1}}>
-                        <div style={{fontSize:10,color:"#94a3b8",marginBottom:3,textTransform:"uppercase",letterSpacing:0.7}}>Scanned (correct)</div>
-                        <div style={{fontFamily:"'Geist Mono',monospace",fontSize:14,color:"#86efac",letterSpacing:1.2}}>{item.scannedSerial}</div>
+                      <div style={{color:"#6d28d9",fontSize:18}}>{"\u2192"}</div>
+                      <div style={{flex:1,minWidth:130}}>
+                        <div style={{fontSize:10,color:"#94a3b8",marginBottom:3,textTransform:"uppercase",letterSpacing:0.7}}>Will record as</div>
+                        <div style={{fontFamily:"'Geist Mono',monospace",fontSize:14,color:"#86efac",letterSpacing:1.2}}>{item.canonical}</div>
                       </div>
-                      <div style={{fontSize:11,color:"#a78bfa"}}>{item.distance} char{item.distance!==1?"s":""} apart</div>
+                      <div style={{display:"flex",gap:6}}>
+                        <button onClick={function(){ setRes(item.id,"accept"); }} style={{background:accepted?"#10b981":"#0f172a",color:accepted?"#04120b":"#86efac",border:"1px solid #10b981",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>{accepted?"\u2713 Accepted":"Accept"}</button>
+                        <button onClick={function(){ setRes(item.id,"reject"); }} style={{background:rejected?"#7f1d1d":"#0f172a",color:rejected?"#fecaca":"#fca5a5",border:"1px solid #7f1d1d",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>{rejected?"\u2715 Rejected":"Reject"}</button>
+                      </div>
                     </div>
                   </div>
                 );
