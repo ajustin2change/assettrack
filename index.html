@@ -2939,7 +2939,10 @@ function PickupScanForm({ticket, onSave, onBack}){
     function removeScan(s){ setScanned(function(prev){ return prev.filter(function(x){ return x!==s; }); }); setResult(null); }
 
   function runComparison(waivedOverride){
-    const w         = waivedOverride || waived;
+    // Only honor the override if it is really a Set. When this runs as a bare
+    // onClick handler, React passes the CLICK EVENT as the first arg — a truthy
+    // non-Set — which must fall back to state. (Fixed: w.has-is-not-a-function.)
+    const w         = (waivedOverride instanceof Set) ? waivedOverride : waived;
     const expSet    = new Set(expected.map(function(a){ return a.serial; }));
     const scannedSet= new Set(scanned);
     const matched=[], missing=[], extra=[], partial=[];
