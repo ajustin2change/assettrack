@@ -46,6 +46,18 @@
       saveShipment:  function(sh){ return repoSet("shipments", sh); },
       saveLocation:  function(l){  return repoSet("locations", l); },
       saveRequestor: function(r){  return repoSet("requestors", r); },
+      // -- Chain-of-custody event log: APPEND-ONLY by design -------------
+      // Deliberately NO update/delete methods: custody events are immutable
+      // audit records. saveCustodyEvent does not reuse repoSet because the
+      // server-side recordedAt must be attached AFTER the JSON cleaning pass
+      // (a raw FieldValue would not survive JSON.parse/JSON.stringify).
+      subscribeCustodyEvents: function(cb){ return db.collection("custodyEvents").onSnapshot(function(s){ cb(repoSnapToList(s)); }); },
+      getCustodyEvents:       function(){ return db.collection("custodyEvents").get().then(repoSnapToList); },
+      saveCustodyEvent:       function(ev){
+        var clean = JSON.parse(JSON.stringify(ev));
+        clean.recordedAt = firebase.firestore.FieldValue.serverTimestamp();
+        return db.collection("custodyEvents").doc(ev.id).set(clean);
+      },
       deleteTicket:    function(id){ return db.collection("tickets").doc(id).delete(); },
       deleteShipment:  function(id){ return db.collection("shipments").doc(id).delete(); },
       deleteLocation:  function(id){ return db.collection("locations").doc(id).delete(); },
@@ -660,6 +672,89 @@ function App(){
     console.error("Firestore "+op+" error:", e);
     setWriteError({ collection: coll, id: id, op: op, message: (e && e.message) || String(e) });
   }
+  // -- Chain-of-custody emission (Option A: wrapper transition detection) --
+  // custodyEvents is an APPEND-ONLY audit log (see repo). Events are inferred
+  // from state transitions inside saveTickets / saveShipments because EVERY
+  // interactive write path flows through those two wrappers -- no UI path can
+  // change custody state without leaving a log entry. Bulk paths (Firestore
+  // subscribe, hydrateAll, legacy session load, pushToFirestore) bypass the
+  // wrappers on purpose and therefore never emit. No backfill: log starts at
+  // go-live. WARNING: if the meaning of pickupScanned, directVendorPickup,
+  // shipment.status, ticketIds or arrivedDate ever changes, revisit the
+  // detectors below -- event semantics ride on those transitions.
+  function emitCustody(type, fields){
+    if(!userRef.current) return;
+    var ev = Object.assign({
+      id: uid(), v: 1, type: type,
+      ticketIds: [], shipmentId: null,
+      provenance: null, serials: [],
+      recorderEmail: userRef.current.email || "",
+      attester: null, witness: null, vendorRef: null,
+      occurredAt: new Date().toISOString(),
+      note: ""
+    }, fields);
+    repo.saveCustodyEvent(ev).catch(function(e){ reportWriteError("save","custodyEvents",ev.id,e); });
+  }
+  function custodySerials(t){
+    var list = (t.pickupScanned ? t.assets : t.expectedAssets) || [];
+    return list.map(function(a){ return a && a.serial; }).filter(Boolean);
+  }
+  function attesterFor(t){
+    var name = (t.requestor||"").trim();
+    var match = (requestorsRef.current||[]).find(function(r){ return (r.name||"").trim().toLowerCase()===name.toLowerCase(); });
+    return { name: name, email: (match && match.email) || "" };
+  }
+  function shipVendorRef(s){ return s.vendorPO || s.auditPo || null; }
+  function shipmentSerials(sh){
+    var out = [];
+    (sh.ticketIds||[]).forEach(function(tid){
+      var t = (ticketsRef.current||[]).find(function(x){ return x.id===tid; });
+      if(t) out = out.concat(custodySerials(t));
+    });
+    return out;
+  }
+  function detectTicketCustody(prev, next){
+    var prevById = {};
+    prev.forEach(function(t){ prevById[t.id] = t; });
+    next.forEach(function(t){
+      var old = prevById[t.id];
+      if(!old) emitCustody("ticket-created", { ticketIds:[t.id], serials: custodySerials(t) });
+      var wasScanned = old ? !!old.pickupScanned : false;
+      if(!wasScanned && t.pickupScanned){
+        if(t.directVendorPickup){
+          emitCustody("pickup-attested", { ticketIds:[t.id], provenance:"expected", serials: custodySerials(t), attester: attesterFor(t) });
+        } else {
+          emitCustody("pickup-scanned",  { ticketIds:[t.id], provenance:"scanned",  serials: custodySerials(t) });
+        }
+      }
+    });
+  }
+  function detectShipmentCustody(prev, next){
+    var prevById = {};
+    prev.forEach(function(s){ prevById[s.id] = s; });
+    next.forEach(function(s){
+      var old = prevById[s.id];
+      var oldIds = old ? (old.ticketIds||[]) : [];
+      var newIds = s.ticketIds||[];
+      var added   = newIds.filter(function(id){ return oldIds.indexOf(id)===-1; });
+      var removed = oldIds.filter(function(id){ return newIds.indexOf(id)===-1; });
+      if(added.length)   emitCustody("grouped-into-shipment",   { shipmentId:s.id, ticketIds:added,   vendorRef:shipVendorRef(s), note:"Grouped into "+(s.name||s.id) });
+      if(removed.length) emitCustody("ungrouped-from-shipment", { shipmentId:s.id, ticketIds:removed, vendorRef:shipVendorRef(s), note:"Removed from "+(s.name||s.id) });
+      var oldStatus = old ? (old.status||"scheduled") : "scheduled";
+      var newStatus = s.status||"scheduled";
+      if(oldStatus==="scheduled" && (newStatus==="picked-up" || newStatus==="reconciled")){
+        emitCustody("vendor-handoff", { shipmentId:s.id, ticketIds:newIds, serials:shipmentSerials(s), vendorRef:shipVendorRef(s), note: newStatus==="reconciled" ? "Inferred: status advanced scheduled to reconciled on "+(s.name||s.id) : (s.name||"") });
+      }
+      var oldArr = old ? (old.arrivedDate||"") : "";
+      var newArr = s.arrivedDate||"";
+      if(newArr && newArr!==oldArr){
+        emitCustody("warehouse-arrival", { shipmentId:s.id, ticketIds:newIds, serials:shipmentSerials(s), vendorRef:shipVendorRef(s), occurredAt:newArr, note: oldArr ? "Arrival date corrected from "+oldArr : (s.name||"") });
+      }
+      if(newStatus==="reconciled" && oldStatus!=="reconciled"){
+        emitCustody("reconciled", { shipmentId:s.id, ticketIds:newIds, serials:shipmentSerials(s), vendorRef:shipVendorRef(s), note:(s.name||"") });
+      }
+    });
+  }
   // UPSERT-ONLY: writes changed/added items, NEVER deletes. Deletion is
   // explicit (remove* below), so a filtered/subset array can no longer
   // silently mass-delete. Runs OUTSIDE the React updater (uses *Ref.current
@@ -676,13 +771,19 @@ function App(){
     var prev = ticketsRef.current || [];
     var next = typeof updaterOrArray==="function" ? updaterOrArray(prev) : updaterOrArray;
     ticketsRef.current = next; setTickets(next);
-    if(userRef.current) upsertList(prev, next, repo.saveTicket, "tickets");
+    if(userRef.current){
+      upsertList(prev, next, repo.saveTicket, "tickets");
+      detectTicketCustody(prev, next); // chain-of-custody (see emitCustody)
+    }
   }
   function saveShipments(updaterOrArray){
     var prev = shipmentsRef.current || [];
     var next = typeof updaterOrArray==="function" ? updaterOrArray(prev) : updaterOrArray;
     shipmentsRef.current = next; setShipments(next);
-    if(userRef.current) upsertList(prev, next, repo.saveShipment, "shipments");
+    if(userRef.current){
+      upsertList(prev, next, repo.saveShipment, "shipments");
+      detectShipmentCustody(prev, next); // chain-of-custody (see emitCustody)
+    }
   }
   function saveLocations(updaterOrArray){
     var prev = locationsRef.current || [];
@@ -703,9 +804,16 @@ function App(){
     if(userRef.current) repo.deleteTicket(id).catch(function(e){ reportWriteError("delete","tickets",id,e); });
   }
   function removeShipment(id){
+    var doomed = (shipmentsRef.current||[]).find(function(x){ return x.id===id; });
     shipmentsRef.current = (shipmentsRef.current||[]).filter(function(x){ return x.id!==id; });
     setShipments(shipmentsRef.current);
-    if(userRef.current) repo.deleteShipment(id).catch(function(e){ reportWriteError("delete","shipments",id,e); });
+    if(userRef.current){
+      // Custody: deletion bypasses saveShipments, so ungroup is emitted here.
+      if(doomed && (doomed.ticketIds||[]).length){
+        emitCustody("ungrouped-from-shipment", { shipmentId:doomed.id, ticketIds:doomed.ticketIds, vendorRef:shipVendorRef(doomed), note:"Vendor pickup "+(doomed.name||doomed.id)+" deleted" });
+      }
+      repo.deleteShipment(id).catch(function(e){ reportWriteError("delete","shipments",id,e); });
+    }
   }
   function removeLocation(id){
     locationsRef.current = (locationsRef.current||[]).filter(function(x){ return x.id!==id; });
@@ -3704,7 +3812,8 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
       id:uid(), name:"", vendor:"", location:"",
       createdDate:localDateStr(),
       pickupDate:"", reconcileDate:"",
-      status:"scheduled", ticketIds:[]
+      status:"scheduled", ticketIds:[],
+      vendorPO:"", arrivedDate:""
     };
   };
 
@@ -3752,6 +3861,17 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
     setShipments(function(prev){ return prev.map(function(x){ return x.id===s.id?updated:x; }); });
   }
 
+  function logArrival(s){
+    var d = prompt("Warehouse arrival date from the vendor receipt email (YYYY-MM-DD):", localDateStr());
+    if(d===null) return;
+    d = d.trim();
+    if(!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(d)){ alert("Enter the date as YYYY-MM-DD."); return; }
+    var po = prompt("Vendor PO # from the receipt email (optional):", s.vendorPO||"");
+    var updated = {...s, arrivedDate:d};
+    if(po!==null && po.trim()) updated.vendorPO = po.trim();
+    setShipments(function(prev){ return prev.map(function(x){ return x.id===s.id?updated:x; }); });
+  }
+
   if(view==="form") return <VendorPickupForm pickup={editing} tickets={tickets} onSave={save} onCancel={function(){ setView("list"); }} readOnly={readOnly}/>;
 
   return (
@@ -3788,6 +3908,7 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
                     {dec.vendor && <span>🏢 {dec.vendor}</span>}
                     {s.location && <span>📍 {s.location}</span>}
                     {s.pickupDate && <span>🚛 Picked up {fmtDate(s.pickupDate)}</span>}
+                    {s.arrivedDate && <span>🏭 Arrived {fmtDate(s.arrivedDate)}</span>}
                     {s.reconcileDate && <span>✓ Reconciled {fmtDate(s.reconcileDate)}</span>}
                     {!s.pickupDate && s.createdDate && <span>📅 Created {fmtDate(s.createdDate)}</span>}
                   </div>
@@ -3797,6 +3918,9 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
                     <button onClick={function(){ advanceStatus(s); }} style={{background:"#0f172a",color:sm.color,border:"1px solid "+sm.border,borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>
                       {s.status==="scheduled"?"Mark Picked Up ▸":"Mark Reconciled ▸"}
                     </button>
+                  )}
+                  {!readOnly && s.status!=="scheduled" && !s.arrivedDate && (
+                    <button onClick={function(){ logArrival(s); }} style={{background:"#0f172a",color:"#a78bfa",border:"1px solid #4c1d95",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>Log Arrival</button>
                   )}
                   <button onClick={function(){ openEdit(s); }} style={{background:"#0f172a",color:readOnly?"#475569":"#93c5fd",border:"1px solid "+(readOnly?"#334155":"#1e3a5f"),borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{readOnly?"View":"Edit"}</button>
                   {!readOnly && <button onClick={function(){ del(s.id); }} style={{background:"#0f172a",color:"#ef4444",border:"1px solid #450a0a",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:12}}>✕</button>}
@@ -3963,6 +4087,16 @@ function VendorPickupForm({pickup, tickets, onSave, onCancel, readOnly}){
             <option value="picked-up">Picked Up</option>
             <option value="reconciled">Reconciled</option>
           </select>
+        </div>
+        <div>
+          <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Vendor PO #</label>
+          <input value={form.vendorPO||""} onChange={function(e){ setF("vendorPO",e.target.value); }} placeholder="From vendor receipt / CoDD" disabled={readOnly}
+            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}/>
+        </div>
+        <div>
+          <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Warehouse Arrival Date</label>
+          <input type="date" value={form.arrivedDate||""} onChange={function(e){ setF("arrivedDate",e.target.value); }} disabled={readOnly}
+            style={{width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}/>
         </div>
       </div>
 
