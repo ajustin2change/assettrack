@@ -709,7 +709,7 @@ function App(){
   // subscribe, hydrateAll, legacy session load, pushToFirestore) bypass the
   // wrappers on purpose and therefore never emit. No backfill: log starts at
   // go-live. WARNING: if the meaning of pickupScanned, directVendorPickup,
-  // shipment.status, ticketIds or arrivedDate ever changes, revisit the
+  // shipment.status, ticketIds, arrivedDate or codd ever changes, revisit the
   // detectors below -- event semantics ride on those transitions.
   function emitCustody(type, fields){
     if(!userRef.current) return;
@@ -781,6 +781,28 @@ function App(){
       }
       if(newStatus==="reconciled" && oldStatus!=="reconciled"){
         emitCustody("reconciled", { shipmentId:s.id, ticketIds:newIds, serials:shipmentSerials(s), vendorRef:shipVendorRef(s), note:(s.name||"") });
+      }
+      // Re-run of reconciliation on an already-reconciled pickup (audit file
+      // replaced): status does not transition, but generatedAt changes.
+      var oldGen = (old && old.reconcileReport && old.reconcileReport.generatedAt) || "";
+      var newGen = (s.reconcileReport && s.reconcileReport.generatedAt) || "";
+      if(oldStatus==="reconciled" && newStatus==="reconciled" && newGen && newGen!==oldGen){
+        emitCustody("reconciled", { shipmentId:s.id, ticketIds:newIds, serials:shipmentSerials(s), vendorRef:shipVendorRef(s), note:(oldGen ? "Re-reconciled - audit file replaced (" : "Reconciliation run on already-reconciled pickup (")+(s.auditFileName||"")+") on "+(s.name||s.id) });
+      }
+      // CoDD attach/replace (custody BUILD 2): batch Certificate of Data
+      // Destruction, metadata only, recorded on the shipment. occurredAt =
+      // the certificate's Date of destruction (honest after-the-fact
+      // recording, same convention as warehouse arrivals); vendorRef = the
+      // PO printed ON the certificate - the vendor-side join key.
+      var oldCodd = old ? (old.codd||null) : null;
+      var newCodd = s.codd||null;
+      if(newCodd && JSON.stringify(newCodd)!==JSON.stringify(oldCodd)){
+        emitCustody("codd-attached", {
+          shipmentId:s.id, ticketIds:newIds, serials:shipmentSerials(s),
+          vendorRef: newCodd.certPO || shipVendorRef(s),
+          occurredAt: newCodd.destructionDate || new Date().toISOString(),
+          note: (oldCodd ? "CoDD replaced (was PO "+(oldCodd.certPO||"?")+", destroyed "+(oldCodd.destructionDate||"?")+")" : "CoDD attached"+(newCodd.certNo?" #"+newCodd.certNo:"")) + (newCodd.fileName ? " ["+newCodd.fileName+"]" : "") + (newCodd.note ? " - "+newCodd.note : "")
+        });
       }
     });
   }
@@ -3942,6 +3964,7 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
                     {s.location && <span>📍 {s.location}</span>}
                     {s.pickupDate && <span>🚛 Picked up {fmtDate(s.pickupDate)}</span>}
                     {s.arrivedDate && <span>🏭 Arrived {fmtDate(s.arrivedDate)}</span>}
+                    {s.codd && <span>📜 CoDD {fmtDate(s.codd.destructionDate)}</span>}
                     {s.reconcileDate && <span>✓ Reconciled {fmtDate(s.reconcileDate)}</span>}
                     {!s.pickupDate && s.createdDate && <span>📅 Created {fmtDate(s.createdDate)}</span>}
                   </div>
@@ -4251,12 +4274,64 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
   const fileRef = useRef();
   const [vendorData, setVendorData]     = useState(null);
   const [vendorFileName, setVendorFileName] = useState(pickup.auditFileName||"");
-  const [poNumber, setPoNumber]         = useState(pickup.auditPo||"");
+  const [poNumber, setPoNumber]         = useState((pickup.codd&&pickup.codd.certPO)||pickup.auditPo||"");
   const [report, setReport]             = useState(pickup.reconcileReport||null);
   const [waivedSerials, setWaivedSerials]   = useState(function(){
     return new Set((pickup.reconcileReport&&pickup.reconcileReport.waivedSerials)||[]);
   });
   const [expandedTickets, setExpandedTickets] = useState({});
+
+  // -- CoDD panel (custody BUILD 2). The certificate PDF is NEVER stored:
+  // we capture metadata + the exact filename (via a picker that reads
+  // nothing) and an optional fileUrl pointer for the future SharePoint /
+  // records home. Attaching writes pickup.codd through the setShipments
+  // prop (= the saveShipments wrapper), which emits the codd-attached
+  // custody event via detectShipmentCustody - no separate emission here.
+  const coddFileRef = useRef();
+  const [coddEditing, setCoddEditing]   = useState(false);
+  const [coddPO, setCoddPO]             = useState("");
+  const [coddDate, setCoddDate]         = useState("");
+  const [coddCertNo, setCoddCertNo]     = useState("");
+  const [coddSignedBy, setCoddSignedBy] = useState("");
+  const [coddUrl, setCoddUrl]           = useState("");
+  const [coddFileName, setCoddFileName] = useState("");
+  const coddInputStyle = {width:"100%",background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",boxSizing:"border-box"};
+  // Compare POs on the alphanumeric core: strips a leading "PO"/"P.O."
+  // prefix, punctuation and spaces, so "P.O. 2737" == "PO#2737" == "2737".
+  function normPO(p){ return String(p||"").toUpperCase().replace(/^P\.?O\.?\s*#?\s*/,"").replace(/[^A-Z0-9]/g,""); }
+  function openCoddEditor(){
+    var cd = pickup.codd||{};
+    setCoddPO(cd.certPO||""); setCoddDate(cd.destructionDate||"");
+    setCoddCertNo(cd.certNo||""); setCoddSignedBy(cd.signedBy||"");
+    setCoddUrl(cd.fileUrl||""); setCoddFileName(cd.fileName||"");
+    setCoddEditing(true);
+  }
+  function pickCoddFile(e){
+    var f = e.target.files[0]; if(!f) return;
+    e.target.value = "";
+    setCoddFileName(f.name); // filename only - the file is never read
+  }
+  function attachCodd(){
+    var po = (coddPO||"").trim();
+    var dd = (coddDate||"").trim();
+    if(!po){ alert("Enter the PO number printed on the certificate - it is the join key to this pickup."); return; }
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(dd)){ alert("Enter the certificate's Date of destruction."); return; }
+    var shipRef = pickup.vendorPO || pickup.auditPo || "";
+    var mismatch = !!shipRef && normPO(shipRef)!==normPO(po);
+    if(mismatch && !confirm("Certificate PO \""+po+"\" does not match this pickup's vendor reference \""+shipRef+"\".\n\nAttach anyway? The mismatch will be recorded in the custody log.")) return;
+    var codd = {
+      certPO: po, destructionDate: dd,
+      certNo: (coddCertNo||"").trim(), signedBy: (coddSignedBy||"").trim(),
+      fileName: coddFileName||"", fileUrl: (coddUrl||"").trim(),
+      attachedAt: new Date().toISOString(),
+      note: mismatch ? ("PO mismatch vs pickup reference "+shipRef) : ""
+    };
+    var updated = {...pickup, codd:codd};
+    if(!shipRef) updated.vendorPO = po; // backfill an empty vendor reference from the cert
+    setShipments(function(prev){ return prev.map(function(x){ return x.id===pickup.id ? updated : x; }); });
+    if(!vendorFileName) setPoNumber(po); // pre-seed the audit PO from the cert until a file sets it
+    setCoddEditing(false);
+  }
 
   function exportIndividualPDFs(){
     var jspdf = window.jspdf || window.jsPDF;
@@ -4432,7 +4507,9 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
     var fnPo = (file.name.match(/P_O__(\d+)/i)||[])[1] || "";
     var fnVp = (file.name.match(/(\d{2}-\d{8}-\d{2})/)||[])[1] || "";
     setVendorFileName(file.name);
-    setPoNumber(fnPo);
+    // Filename PO wins when present; otherwise keep the CoDD-seeded / typed
+    // PO instead of clobbering it with "".
+    setPoNumber(fnPo || (pickup.codd&&pickup.codd.certPO) || poNumber || "");
     setReport(null);
 
     var reader = new FileReader();
@@ -4656,6 +4733,67 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
       </div>
       <div style={{fontSize:12,color:"#64748b",marginBottom:20}}>{ourAssets.length} expected asset{ourAssets.length!==1?"s":""} across {pickup.ticketIds.length} ticket{pickup.ticketIds.length!==1?"s":""}</div>
 
+      {/* CoDD - step 1, above the audit upload: the cert and the audit ship
+          together, and the cert's PO is entered here first so it seeds the
+          audit PO below (cert-audit PO agreement becomes the default). */}
+      <div style={{background:"#1e293b",borderRadius:12,border:"1px solid "+(pickup.codd?"#4c1d95":"#334155"),padding:"20px 24px",marginBottom:16}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
+          <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0"}}>📜 Certificate of Data Destruction</div>
+          {!readOnly && !coddEditing && (
+            <button onClick={openCoddEditor} style={{background:"#0f172a",color:"#a78bfa",border:"1px solid #4c1d95",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>{pickup.codd?"Replace CoDD":"Attach CoDD"}</button>
+          )}
+        </div>
+        {pickup.codd && !coddEditing && (
+          <div style={{marginTop:10,fontSize:12,color:"#94a3b8",display:"flex",gap:14,flexWrap:"wrap",alignItems:"center"}}>
+            <span>{"PO "}<strong style={{color:"#f1f5f9",fontFamily:"'Geist Mono',monospace"}}>{pickup.codd.certPO}</strong></span>
+            <span>{"Destroyed "}<strong style={{color:"#f1f5f9"}}>{fmtDate(pickup.codd.destructionDate)}</strong></span>
+            {pickup.codd.certNo && <span>{"Cert # "}<strong style={{color:"#f1f5f9",fontFamily:"'Geist Mono',monospace"}}>{pickup.codd.certNo}</strong></span>}
+            {pickup.codd.signedBy && <span>{"Signed by "}<strong style={{color:"#f1f5f9"}}>{pickup.codd.signedBy}</strong></span>}
+            {pickup.codd.fileName && <span style={{color:"#64748b"}}>📎 {pickup.codd.fileName}</span>}
+            {pickup.codd.fileUrl && <a href={pickup.codd.fileUrl} target="_blank" rel="noreferrer" style={{color:"#93c5fd"}}>{"Open file \u2197"}</a>}
+            {pickup.codd.note && <span style={{color:"#fbbf24"}}>{"\u26A0 "+pickup.codd.note}</span>}
+          </div>
+        )}
+        {!pickup.codd && !coddEditing && (
+          <div style={{marginTop:10,padding:"8px 12px",background:"#42200622",border:"1px solid #a16207",borderRadius:8,fontSize:12,color:"#fde68a"}}>
+            {"\u26A0 No CoDD attached to this pickup."}{readOnly ? "" : " Attach the certificate first - it ships together with the audit file."}
+          </div>
+        )}
+        {coddEditing && !readOnly && (
+          <div style={{marginTop:12}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
+              <div>
+                <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>PO # on certificate *</label>
+                <input value={coddPO} onChange={function(e){ setCoddPO(e.target.value); }} placeholder="e.g. 2737" style={coddInputStyle}/>
+              </div>
+              <div>
+                <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Date of destruction *</label>
+                <input type="date" value={coddDate} onChange={function(e){ setCoddDate(e.target.value); }} style={coddInputStyle}/>
+              </div>
+              <div>
+                <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Cert # (optional)</label>
+                <input value={coddCertNo} onChange={function(e){ setCoddCertNo(e.target.value); }} placeholder="if printed on the cert" style={coddInputStyle}/>
+              </div>
+              <div>
+                <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>Signed by (optional)</label>
+                <input value={coddSignedBy} onChange={function(e){ setCoddSignedBy(e.target.value); }} placeholder="name, title" style={coddInputStyle}/>
+              </div>
+              <div>
+                <label style={{display:"block",fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:6}}>File link (optional)</label>
+                <input value={coddUrl} onChange={function(e){ setCoddUrl(e.target.value); }} placeholder="SharePoint / records URL (future)" style={coddInputStyle}/>
+              </div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginTop:12,flexWrap:"wrap"}}>
+              <input ref={coddFileRef} type="file" accept=".pdf" style={{display:"none"}} onChange={pickCoddFile}/>
+              <button onClick={function(){ coddFileRef.current&&coddFileRef.current.click(); }} style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{coddFileName ? "📎 "+coddFileName : "📎 Pick the CoDD PDF (records the filename only)"}</button>
+              <div style={{flex:1}}/>
+              <button onClick={function(){ setCoddEditing(false); }} style={{background:"none",color:"#64748b",border:"1px solid #334155",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>Cancel</button>
+              <button onClick={attachCodd} style={{background:"linear-gradient(135deg,#6d28d9,#1d4ed8)",color:"#fff",border:"none",borderRadius:8,padding:"8px 18px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>{pickup.codd ? "Replace CoDD \u2192" : "Attach CoDD \u2192"}</button>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Upload */}
       <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"20px 24px",marginBottom:16}}>
         <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:12}}>Vendor Audit File</div>
@@ -4679,6 +4817,11 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
                 Run Reconciliation →
               </button>}
             </div>
+            {pickup.codd && pickup.codd.certPO && normPO(vendorData.po||poNumber)!==normPO(pickup.codd.certPO) && (
+              <div style={{marginTop:10,padding:"8px 12px",background:"#42200622",border:"1px solid #a16207",borderRadius:8,fontSize:12,color:"#fde68a"}}>
+                {"\u26A0 Audit PO (\""+((vendorData.po||poNumber)||"none")+"\") differs from the CoDD PO (\""+pickup.codd.certPO+"\") - the certificate may not cover this audit."}
+              </div>
+            )}
             {vendorData.serialKey ? (
               <div style={{marginTop:10,padding:"8px 12px",background:"#06281f",border:"1px solid #15803d",borderRadius:8,fontSize:12,color:"#bbf7d0"}}>
                 <strong style={{color:"#86efac"}}>Detected columns</strong>{" \u2014 confirm before running:"}
@@ -4702,6 +4845,11 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
       {/* Results */}
       {report && (
         <div>
+          {!pickup.codd && (
+            <div style={{background:"#42200622",border:"1px solid #a16207",borderRadius:8,padding:"10px 12px",marginBottom:14,fontSize:12,color:"#fde68a"}}>
+              <strong style={{color:"#fbbf24"}}>{"\u26A0 No CoDD attached."}</strong>{" This pickup has no Certificate of Data Destruction on file. Reconciliation is not blocked, but the compliance chain is incomplete until the certificate is attached above."}
+            </div>
+          )}
           {report.serialCollisions && report.serialCollisions.length > 0 && (
             <div style={{background:"#7f1d1d22",border:"1px solid #fca5a5",borderRadius:8,padding:"10px 12px",marginBottom:14,fontSize:12,color:"#fecaca"}}>
               <strong style={{color:"#fca5a5"}}>{"\u26A0 Ambiguous serials in vendor file ("+report.serialCollisions.length+")."}</strong>{" Two or more vendor serials share the same numeric value (e.g. a stripped leading zero), so a numeric match can't be trusted for them. Any of these were matched by EXACT serial only \u2014 verify by hand:"}
