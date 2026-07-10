@@ -6,7 +6,7 @@ const fs = require("fs");
 const file = process.argv[2] || "./index.html";
 const html = fs.readFileSync(file, "utf-8");
 const start = html.indexOf("function levenshtein");
-const end = html.indexOf("// ── No-op corrections");
+const end = html.indexOf("// ── Correction-row visualization");
 if(start < 0 || end < 0 || end <= start) throw new Error("matcher block not found in " + file);
 eval(html.slice(start, end));
 
@@ -67,6 +67,21 @@ t("exact beats containment",
 t("no match",
   summarize(bestMatch("ABCD1234", ["ZZZZ9999XXXX"])),
   null);
+
+// ── isNoopCorrection: approval-exemption rule ──
+function noop(p){ return isNoopCorrection(p) && p.resolution==="accept"; }
+t("noop: accepted auto-exact, record unchanged",
+  noop({matchKind:"exact", canonical:"PF0DBAV8", expectedSerial:"PF0DBAV8", resolution:"accept"}), true);
+t("noop: accepted containment/7-char review, record unchanged",
+  noop({matchKind:"exact-review", canonical:"PF0DBAV8", expectedSerial:"PF0DBAV8", resolution:"accept"}), true);
+t("kept: rejected review is never no-op",
+  noop({matchKind:"exact-review", canonical:"PF0DBAV8", expectedSerial:"PF0DBAV8", resolution:"reject"}), false);
+t("kept: accepted review but record CHANGES (dirty ticket serial)",
+  noop({matchKind:"exact-review", canonical:"R3XS684047X", expectedSerial:"R3XS684047X | IMEI: 35893", resolution:"accept"}), false);
+t("kept: fuzzy is never no-op",
+  noop({matchKind:"fuzzy", canonical:"C02MCAJDV7L", expectedSerial:"C02GMCAJDV7L", resolution:"accept"}), false);
+t("noop: case-insensitive serial compare",
+  noop({matchKind:"exact", canonical:"PF0DBAV8", expectedSerial:"pf0dbav8", resolution:"accept"}), true);
 
 console.log(pass + " passed, " + fail + " failed");
 process.exit(fail ? 1 : 0);

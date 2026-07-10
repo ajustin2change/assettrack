@@ -238,13 +238,16 @@ function bestMatch(expSerial, pool){
   return null;
 }
 // ── No-op corrections (approval-exempt) ──
-// A "no-op" correction: embedded-exact where the recorded serial equals the
-// ticket serial (scanner noise stripped; the customer's record is unchanged).
-// ACCEPTED no-ops are internal hygiene: excluded from the approval round-trip,
+// A "no-op" correction: an exact-token match — auto ("exact") or review-tier
+// ("exact-review": containment / 7-char token, accepted by the operator) —
+// where the recorded serial equals the ticket serial VERBATIM. Scanner noise
+// was stripped; the customer's record is unchanged, so there is nothing for
+// them to decide. ACCEPTED no-ops are excluded from the approval round-trip,
 // approval documents, email counts, and derived approval status. They remain
-// fully visible in the scan view and preserved in pickupResult/pickupScanList.
+// fully visible in the scan view (review rows still require the operator's
+// accept) and preserved in pickupResult/pickupScanList. Fuzzy is NEVER no-op.
 function isNoopCorrection(p){
-  return !!p && p.matchKind==="exact" &&
+  return !!p && (p.matchKind==="exact" || p.matchKind==="exact-review") &&
     String(p.canonical||"").trim().toUpperCase()===String(p.expectedSerial||"").trim().toUpperCase();
 }
 function actionableCorrections(list){
