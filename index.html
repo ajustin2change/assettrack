@@ -210,11 +210,22 @@ function extractIdentifiers(str){
   return Object.keys(cands);
 }
 function bestMatch(expSerial, pool){
-  var expToks=extractIdentifiers(expSerial); var exact=null, fuzzy=null;
+  var expToks=extractIdentifiers(expSerial); var exact=null, contained=null, fuzzy=null;
   pool.forEach(function(sc){
     var scToks=extractIdentifiers(sc);
     expToks.forEach(function(et){ scToks.forEach(function(st){
       if(et===st){ if(et.length>=EXACT_MIN_LEN && (!exact||et.length>exact.token.length)) exact={scanned:sc,token:et}; }
+      // Containment tier: one side's token is an exact substring of a LONGER
+      // token on the other side — undelimited compound barcodes (e.g. Lenovo
+      // 1S + machine-type-model + serial scans as one solid token). Min length
+      // EXACT_AUTO_LEN(8) for the contained token; ALWAYS review, never auto —
+      // substring evidence is weaker than a delimited shared token.
+      else if(et.length>=EXACT_AUTO_LEN && st.length>et.length && st.indexOf(et)!==-1){
+        if(!contained||et.length>contained.token.length) contained={scanned:sc,token:et};
+      }
+      else if(st.length>=EXACT_AUTO_LEN && et.length>st.length && et.indexOf(st)!==-1){
+        if(!contained||st.length>contained.token.length) contained={scanned:sc,token:st};
+      }
       else if(et.length>=FUZZY_MIN_LEN && st.length>=FUZZY_MIN_LEN){
         var maxd=(et.length>=10&&st.length>=10)?2:1; var d=levenshtein(et,st);
         if(d>=1&&d<=maxd&&(!fuzzy||d<fuzzy.distance||(d===fuzzy.distance&&(et.length+st.length)>(fuzzy.expTok.length+fuzzy.scTok.length)))) fuzzy={scanned:sc,expTok:et,scTok:st,distance:d};
@@ -222,6 +233,7 @@ function bestMatch(expSerial, pool){
     }); });
   });
   if(exact) return {kind:(exact.token.length>=EXACT_AUTO_LEN)?"exact":"exact-review", scanned:exact.scanned, canonical:exact.token, expToken:exact.token, scanToken:exact.token, distance:0};
+  if(contained) return {kind:"exact-review", scanned:contained.scanned, canonical:contained.token, expToken:contained.token, scanToken:contained.token, distance:0};
   if(fuzzy) return {kind:"fuzzy", scanned:fuzzy.scanned, canonical:fuzzy.scanned, expToken:fuzzy.expTok, scanToken:fuzzy.scTok, distance:fuzzy.distance};
   return null;
 }
