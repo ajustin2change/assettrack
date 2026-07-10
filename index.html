@@ -3624,6 +3624,7 @@ function PickupScanForm({ticket, onSave, onBack}){
                         <div style={{fontSize:10,color:"#94a3b8",marginBottom:3,textTransform:"uppercase",letterSpacing:0.7}}>Expected (ticket)</div>
                         <div style={{fontFamily:"'Geist Mono',monospace",fontSize:13,letterSpacing:1}}>{highlightToken(item.expectedSerial, item.expToken)}</div>
                         {item.matchKind==="fuzzy" && <div style={{fontSize:10,color:"#fcd34d",marginTop:5,fontFamily:"'Geist Mono',monospace"}}>{"scanned: "}{diffMark(item.scanToken, item.expToken)}{" ("+item.distance+" off)"}</div>}
+                        {item.matchKind!=="fuzzy" && item.scannedSerial && item.scannedSerial!==item.canonical && <div style={{fontSize:10,color:"#fcd34d",marginTop:5,fontFamily:"'Geist Mono',monospace"}}>{"scanned: "}{highlightToken(item.scannedSerial, item.scanToken)}</div>}
                       </div>
                       <div style={{color:"#6d28d9",fontSize:18}}>{"\u2192"}</div>
                       <div style={{flex:1,minWidth:130}}>
