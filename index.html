@@ -1600,6 +1600,7 @@ function custodyRecordedDate(rec){
 }
 function CustodyTimeline({events}){
   const [openSerials, setOpenSerials] = useState({});
+  const [openHeaderSerials, setOpenHeaderSerials] = useState(false);
   var sorted = (events||[]).slice().sort(function(a,b){
     var cmp = String(a.occurredAt||"").localeCompare(String(b.occurredAt||""));
     if(cmp!==0) return cmp;
@@ -1609,22 +1610,46 @@ function CustodyTimeline({events}){
   if(sorted.length===0) return (
     <div style={{padding:"16px 4px",fontSize:12,color:"#64748b"}}>No custody events recorded. The log starts at go-live — earlier history was not backfilled.</div>
   );
+  var headerRef = null, headerSerials = null;
+  for(var hi=sorted.length-1; hi>=0; hi--){
+    if(headerRef===null && sorted[hi].vendorRef) headerRef = sorted[hi].vendorRef;
+    if(headerSerials===null && (sorted[hi].serials||[]).length) headerSerials = sorted[hi].serials;
+    if(headerRef!==null && headerSerials!==null) break;
+  }
+  var headerKey = headerSerials ? headerSerials.join("|") : "";
   return (
-    <div style={{position:"relative",paddingLeft:32,paddingTop:4}}>
+    <React.Fragment>
+      {(headerRef || headerSerials) && (
+        <div style={{marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            {headerRef && <span style={{fontSize:10,fontFamily:"'Geist Mono',monospace",background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:5,padding:"2px 8px"}}>PO {headerRef}</span>}
+            {headerSerials && (
+              <button onClick={function(){ setOpenHeaderSerials(function(v){ return !v; }); }} style={{background:"#0f172a",color:"#94a3b8",border:"1px solid #334155",borderRadius:5,padding:"2px 9px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}}>{headerSerials.length+" serial"+(headerSerials.length!==1?"s":"")+" in custody"+(openHeaderSerials?" ▴":" ▾")}</button>
+            )}
+          </div>
+          {openHeaderSerials && headerSerials && (
+            <div style={{marginTop:6,padding:"8px 10px",background:"#0f172a",border:"1px solid #334155",borderRadius:7,fontFamily:"'Geist Mono',monospace",fontSize:10,color:"#94a3b8",maxHeight:140,overflowY:"auto",lineHeight:1.8}}>
+              {headerSerials.join("  ·  ")}
+            </div>
+          )}
+        </div>
+      )}
+      <div style={{position:"relative",paddingLeft:32,paddingTop:4}}>
       <div style={{position:"absolute",left:12,top:10,bottom:10,width:2,background:"#334155"}}/>
       {sorted.map(function(ev){
         var m = CUSTODY_META[ev.type] || {icon:"•", label:ev.type||"(unknown event)", color:"#94a3b8", border:"#334155"};
         var rec = custodyRecordedDate(ev.recordedAt);
         var showRecorded = rec && custodyDayLocal(ev.occurredAt)!==rec.toLocaleDateString();
         var serialCount = (ev.serials||[]).length;
+        var serialsDiffer = serialCount>0 && (ev.serials||[]).join("|")!==headerKey;
         return (
           <div key={ev.id} style={{position:"relative",paddingBottom:16}}>
             <div style={{position:"absolute",left:-32,top:0,width:26,height:26,borderRadius:"50%",background:"#0f172a",border:"2px solid "+m.border,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12}}>{m.icon}</div>
             <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",minHeight:26}}>
               <span style={{fontSize:13,fontWeight:600,color:m.color}}>{m.label}</span>
-              {ev.vendorRef && <span style={{fontSize:10,fontFamily:"'Geist Mono',monospace",background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:5,padding:"1px 7px"}}>PO {ev.vendorRef}</span>}
+              {ev.vendorRef && ev.vendorRef!==headerRef && <span style={{fontSize:10,fontFamily:"'Geist Mono',monospace",background:"#0f172a",color:"#93c5fd",border:"1px solid #1e3a5f",borderRadius:5,padding:"1px 7px"}}>PO {ev.vendorRef}</span>}
               {ev.provenance && <span style={{fontSize:10,color:"#64748b",border:"1px solid #334155",borderRadius:5,padding:"1px 7px"}}>{ev.provenance}</span>}
-              {serialCount>0 && (
+              {serialsDiffer && (
                 <button onClick={function(){ setOpenSerials(function(o){ var n={...o}; n[ev.id]=!n[ev.id]; return n; }); }} style={{background:"#0f172a",color:"#94a3b8",border:"1px solid #334155",borderRadius:5,padding:"1px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}}>{serialCount+" serial"+(serialCount!==1?"s":"")+(openSerials[ev.id]?" ▴":" ▾")}</button>
               )}
             </div>
@@ -1635,7 +1660,7 @@ function CustodyTimeline({events}){
               {ev.attester && ev.attester.name && <span style={{color:"#64748b"}}>{" · attested by "+ev.attester.name}</span>}
             </div>
             {ev.note && <div style={{fontSize:11,color:"#64748b",fontStyle:"italic",marginTop:2}}>{ev.note}</div>}
-            {openSerials[ev.id] && serialCount>0 && (
+            {openSerials[ev.id] && serialsDiffer && (
               <div style={{marginTop:6,padding:"8px 10px",background:"#0f172a",border:"1px solid #334155",borderRadius:7,fontFamily:"'Geist Mono',monospace",fontSize:10,color:"#94a3b8",maxHeight:140,overflowY:"auto",lineHeight:1.8}}>
                 {ev.serials.join("  ·  ")}
               </div>
@@ -1643,7 +1668,8 @@ function CustodyTimeline({events}){
           </div>
         );
       })}
-    </div>
+      </div>
+    </React.Fragment>
   );
 }
 function CustodyModal({title, subtitle, events, onClose}){
