@@ -125,7 +125,7 @@ function generateApprovalSheet(ticket, resolved){
     addRow("Not on List (Extra)", e.serial, "Picked up but not in submitted list");
   });
   actionableCorrections(resolved.partial).forEach(function(p){
-    addRow("Partial Match", p.expectedSerial, "Expected: "+p.expectedSerial+" / Scanned: "+p.scannedSerial);
+    addRow("Partial Match", p.expectedSerial, "Expected: "+p.expectedSerial+" / Scanned: "+p.scannedSerial+" / Will record as: "+(p.canonical||p.scannedSerial));
   });
 
   const header = ["Category","Serial Number","Details","Decision","Notes"];
@@ -2136,7 +2136,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
       rowStyles[idx++] = {fillColor:[219,234,254]};
     });
     actionableCorrections(resolved.partial).forEach(function(p){
-      bodyRows.push(["Proposed Correction", p.expectedSerial||"", p.scannedSerial||"", p.manufacturer||"", p.machineType||"", p.ouInventory||"", ""]);
+      bodyRows.push(["Proposed Correction", p.expectedSerial||"", (p.canonical||p.scannedSerial||"")+((p.scannedSerial&&p.canonical&&p.scannedSerial!==p.canonical)?"\n(captured: "+p.scannedSerial+")":""), p.manufacturer||"", p.machineType||"", p.ouInventory||"", ""]);
       rowStyles[idx++] = {fillColor:[254,252,202]};
     });
     // Linked pairs
@@ -2150,7 +2150,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
       head:[[
         {content:"Type",styles:{cellWidth:90}},
         {content:"Serial # on Ticket",styles:{cellWidth:110}},
-        {content:"Serial # Scanned",styles:{cellWidth:110}},
+        {content:"Will Record As",styles:{cellWidth:110}},
         {content:"Manufacturer",styles:{cellWidth:80}},
         {content:"Machine Type",styles:{cellWidth:90}},
         {content:"Asset Tag",styles:{cellWidth:70}},
@@ -2576,8 +2576,9 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
                 return <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0",borderBottom:"1px solid #2e1065",flexWrap:"wrap"}}>
                   <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#fca5a5",textDecoration:"line-through"}}>{p.expectedSerial}</span>
                   <span style={{color:"#6d28d9"}}>→</span>
-                  <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#86efac"}}>{p.scannedSerial}</span>
-                  <span style={{fontSize:10,color:"#64748b"}}>{p.distance} char(s) apart</span>
+                  <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#86efac"}}>{p.canonical||p.scannedSerial}</span>
+                  {p.distance>0 && <span style={{fontSize:10,color:"#64748b"}}>{p.distance} char(s) apart</span>}
+                  {p.scannedSerial && p.canonical && p.scannedSerial!==p.canonical && <span style={{fontSize:10,color:"#64748b",fontFamily:"'Geist Mono',monospace",flexBasis:"100%"}}>captured as: {p.scannedSerial}</span>}
                 </div>;
               })}
               {(pr.missing||[]).filter(function(m){ return m.linkedTo; }).map(function(m,i){
@@ -3324,7 +3325,7 @@ function PickupScanForm({ticket, onSave, onBack}){
       bodyRows.push([
         "Correction",
         p.expectedSerial||"",
-        p.scannedSerial||"",
+        (p.canonical||p.scannedSerial||"")+((p.scannedSerial&&p.canonical&&p.scannedSerial!==p.canonical)?"\n(captured: "+p.scannedSerial+")":""),
         p.manufacturer||"",
         p.machineType||"",
         p.ouInventory||"",
@@ -3341,7 +3342,7 @@ function PickupScanForm({ticket, onSave, onBack}){
       head: [[
         {content:"Type",          styles:{halign:"center", cellWidth:52}},
         {content:"Serial # on Ticket", styles:{cellWidth:110}},
-        {content:"Serial # Scanned",   styles:{cellWidth:110}},
+        {content:"Will Record As",   styles:{cellWidth:110}},
         {content:"Manufacturer",  styles:{cellWidth:72}},
         {content:"Machine Type",  styles:{cellWidth:72}},
         {content:"Asset Tag",     styles:{cellWidth:60}},
