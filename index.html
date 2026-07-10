@@ -124,7 +124,7 @@ function generateApprovalSheet(ticket, resolved){
   (resolved.extra||[]).forEach(function(e){
     addRow("Not on List (Extra)", e.serial, "Picked up but not in submitted list");
   });
-  (resolved.partial||[]).forEach(function(p){
+  actionableCorrections(resolved.partial).forEach(function(p){
     addRow("Partial Match", p.expectedSerial, "Expected: "+p.expectedSerial+" / Scanned: "+p.scannedSerial);
   });
 
@@ -225,6 +225,20 @@ function bestMatch(expSerial, pool){
   if(fuzzy) return {kind:"fuzzy", scanned:fuzzy.scanned, canonical:fuzzy.scanned, expToken:fuzzy.expTok, scanToken:fuzzy.scTok, distance:fuzzy.distance};
   return null;
 }
+// ── No-op corrections (approval-exempt) ──
+// A "no-op" correction: embedded-exact where the recorded serial equals the
+// ticket serial (scanner noise stripped; the customer's record is unchanged).
+// ACCEPTED no-ops are internal hygiene: excluded from the approval round-trip,
+// approval documents, email counts, and derived approval status. They remain
+// fully visible in the scan view and preserved in pickupResult/pickupScanList.
+function isNoopCorrection(p){
+  return !!p && p.matchKind==="exact" &&
+    String(p.canonical||"").trim().toUpperCase()===String(p.expectedSerial||"").trim().toUpperCase();
+}
+function actionableCorrections(list){
+  return (list||[]).filter(function(p){ return !(isNoopCorrection(p) && p.resolution==="accept"); });
+}
+
 // ── Correction-row visualization (Phase 2b) ──
 function highlightToken(original, token){
   var orig=String(original||""); var up=orig.toUpperCase(); var t=String(token||"").toUpperCase();
@@ -378,7 +392,7 @@ function pickupStatus(ticket){
   if(ticket.approvalStatus === "awaiting-approval") return "awaiting-approval";
   const r = ticket.pickupResult;
   if(!r) return "pending";
-  const hasApprovalItems = (r.missing&&r.missing.length>0) || (r.extra&&r.extra.length>0) || (r.partial&&r.partial.length>0);
+  const hasApprovalItems = (r.missing&&r.missing.length>0) || (r.extra&&r.extra.length>0) || actionableCorrections(r.partial).length>0;
   return hasApprovalItems ? "awaiting-approval" : "verified";
 }
 
@@ -2121,7 +2135,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
       bodyRows.push(["Extra", "", e.serial||"", "", "", "", ""]);
       rowStyles[idx++] = {fillColor:[219,234,254]};
     });
-    resolved.partial.forEach(function(p){
+    actionableCorrections(resolved.partial).forEach(function(p){
       bodyRows.push(["Proposed Correction", p.expectedSerial||"", p.scannedSerial||"", p.manufacturer||"", p.machineType||"", p.ouInventory||"", ""]);
       rowStyles[idx++] = {fillColor:[254,252,202]};
     });
@@ -2555,10 +2569,10 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
           )}
 
           {/* Proposed Corrections */}
-          {((pr.partial||[]).length+(pr.missing||[]).filter(function(m){ return m.linkedTo; }).length)>0 && (
+          {(actionableCorrections(pr.partial).length+(pr.missing||[]).filter(function(m){ return m.linkedTo; }).length)>0 && (
             <div style={{background:"#1e1040",border:"1px solid #a78bfa",borderRadius:8,padding:"12px 14px",marginBottom:8}}>
-              <div style={{color:"#a78bfa",fontWeight:600,fontSize:13,marginBottom:8}}>🔧 Proposed Corrections ({(pr.partial||[]).length+(pr.missing||[]).filter(function(m){ return m.linkedTo; }).length})</div>
-              {(pr.partial||[]).map(function(p,i){
+              <div style={{color:"#a78bfa",fontWeight:600,fontSize:13,marginBottom:8}}>🔧 Proposed Corrections ({actionableCorrections(pr.partial).length+(pr.missing||[]).filter(function(m){ return m.linkedTo; }).length})</div>
+              {actionableCorrections(pr.partial).map(function(p,i){
                 return <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0",borderBottom:"1px solid #2e1065",flexWrap:"wrap"}}>
                   <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#fca5a5",textDecoration:"line-through"}}>{p.expectedSerial}</span>
                   <span style={{color:"#6d28d9"}}>→</span>
@@ -3306,7 +3320,7 @@ function PickupScanForm({ticket, onSave, onBack}){
       rowStyles[rowIdx] = {fillColor:[254,252,202]};
       rowIdx++;
     });
-    resolved.partial.forEach(function(p){
+    actionableCorrections(resolved.partial).forEach(function(p){
       bodyRows.push([
         "Correction",
         p.expectedSerial||"",
@@ -3428,7 +3442,7 @@ function PickupScanForm({ticket, onSave, onBack}){
       if(email){
         const unlinkedMissing = resolved.missing.filter(function(m){ return !m.linkedTo; });
         const unlinkedExtra   = resolved.extra.filter(function(e){ return !e.linkedTo; });
-        const corrections     = resolved.missing.filter(function(m){ return m.linkedTo; }).length + resolved.partial.length;
+        const corrections     = resolved.missing.filter(function(m){ return m.linkedTo; }).length + actionableCorrections(resolved.partial).length;
         const subject = encodeURIComponent("IT Asset Disposal Approval Required - Ticket "+ticket.ticketNo);
         const body = encodeURIComponent(
           "Hello,\n\nYour IT asset disposal pickup for ticket "+ticket.ticketNo+" has been completed. The attached CSV lists items that require your approval.\n\n"+
@@ -3453,7 +3467,7 @@ function PickupScanForm({ticket, onSave, onBack}){
   const needsApproval = result && (
     result.missing.some(function(m){ return !links[m.id]; }) ||
     result.extra.some(function(e){ return !links[e.id]; }) ||
-    result.partial.length > 0 ||
+    result.partial.some(function(p){ return !(isNoopCorrection(p) && effRes(p)==="accept"); }) ||
     Object.keys(links).length > 0
   );
   const unresolvedCount = 0; // kept for compat — no per-item decisions in new model
