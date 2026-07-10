@@ -68,6 +68,11 @@ t("no match",
   summarize(bestMatch("ABCD1234", ["ZZZZ9999XXXX"])),
   null);
 
+// 11. Fuzzy hit INSIDE a compound capture records the matched TOKEN, not the dump
+t("fuzzy in compound capture records token",
+  summarize(bestMatch("C02GMCAJDV7L", ["MACBOOK PRO,C02MCAJDV7L,A1990"])),
+  {kind:"fuzzy", canonical:"C02MCAJDV7L", scanned:"MACBOOK PRO,C02MCAJDV7L,A1990", distance:1});
+
 // ── isNoopCorrection: approval-exemption rule ──
 function noop(p){ return isNoopCorrection(p) && p.resolution==="accept"; }
 t("noop: accepted auto-exact, record unchanged",

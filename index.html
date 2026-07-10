@@ -234,7 +234,7 @@ function bestMatch(expSerial, pool){
   });
   if(exact) return {kind:(exact.token.length>=EXACT_AUTO_LEN)?"exact":"exact-review", scanned:exact.scanned, canonical:exact.token, expToken:exact.token, scanToken:exact.token, distance:0};
   if(contained) return {kind:"exact-review", scanned:contained.scanned, canonical:contained.token, expToken:contained.token, scanToken:contained.token, distance:0};
-  if(fuzzy) return {kind:"fuzzy", scanned:fuzzy.scanned, canonical:fuzzy.scanned, expToken:fuzzy.expTok, scanToken:fuzzy.scTok, distance:fuzzy.distance};
+  if(fuzzy) return {kind:"fuzzy", scanned:fuzzy.scanned, canonical:fuzzy.scTok, expToken:fuzzy.expTok, scanToken:fuzzy.scTok, distance:fuzzy.distance};
   return null;
 }
 // ── No-op corrections (approval-exempt) ──
@@ -2008,6 +2008,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
                             return {
                               ...x,
                               approvalStatus:  "validated",
+                              validatedAt:     new Date().toLocaleString(),
                               assets:          resolvedAssets,
                               expectedAssets:  syncedExpected,
                               originalAssets:  x.originalAssets || x.expectedAssets, // freeze original on first validation
@@ -3213,6 +3214,7 @@ function PickupScanForm({ticket, onSave, onBack}){
       assets:           finalAssets,
       approvalStatus:   "validated",
       approvalSentAt:   now,
+      validatedAt:      now,
       directVendorPickup: true,
     });
     onBack();
@@ -3654,7 +3656,7 @@ function PickupScanForm({ticket, onSave, onBack}){
                         <div style={{fontSize:10,color:"#94a3b8",marginBottom:3,textTransform:"uppercase",letterSpacing:0.7}}>Expected (ticket)</div>
                         <div style={{fontFamily:"'Geist Mono',monospace",fontSize:13,letterSpacing:1}}>{highlightToken(item.expectedSerial, item.expToken)}</div>
                         {item.matchKind==="fuzzy" && <div style={{fontSize:10,color:"#fcd34d",marginTop:5,fontFamily:"'Geist Mono',monospace"}}>{"scanned: "}{diffMark(item.scanToken, item.expToken)}{" ("+item.distance+" off)"}</div>}
-                        {item.matchKind!=="fuzzy" && item.scannedSerial && item.scannedSerial!==item.canonical && <div style={{fontSize:10,color:"#fcd34d",marginTop:5,fontFamily:"'Geist Mono',monospace"}}>{"scanned: "}{highlightToken(item.scannedSerial, item.scanToken)}</div>}
+                        {item.scannedSerial && item.scannedSerial!==item.canonical && <div style={{fontSize:10,color:"#fcd34d",marginTop:5,fontFamily:"'Geist Mono',monospace"}}>{"captured: "}{highlightToken(item.scannedSerial, item.scanToken)}</div>}
                       </div>
                       <div style={{color:"#6d28d9",fontSize:18}}>{"\u2192"}</div>
                       <div style={{flex:1,minWidth:130}}>
