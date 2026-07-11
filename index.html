@@ -58,6 +58,11 @@
         clean.recordedAt = firebase.firestore.FieldValue.serverTimestamp();
         return db.collection("custodyEvents").doc(ev.id).set(clean);
       },
+      // -- App config: ONE small key-value doc (config/app), e.g. the
+      // governance-manifest destination email (BUILD 4). Read once at
+      // sign-in. Owner-write under the wildcard rule like everything else.
+      getConfig:  function(){ return db.collection("config").doc("app").get().then(function(d){ return d.exists ? d.data() : {}; }); },
+      saveConfig: function(cfg){ return db.collection("config").doc("app").set(JSON.parse(JSON.stringify(cfg))); },
       deleteTicket:    function(id){ return db.collection("tickets").doc(id).delete(); },
       deleteShipment:  function(id){ return db.collection("shipments").doc(id).delete(); },
       deleteLocation:  function(id){ return db.collection("locations").doc(id).delete(); },
@@ -642,6 +647,7 @@ function App(){
   const [tickets, setTickets]       = useState([]);
   const [shipments, setShipments]   = useState([]);
   const [custodyEvents, setCustodyEvents] = useState([]); // read-only display of the append-only log (BUILD 3); no ref - never diffed, never written from state
+  const [appConfig, setAppConfig] = useState({}); // small settings doc (BUILD 4): { governanceEmail }
   const [vendorReport, setVendorReport] = useState(null);
   const [importMsg, setImportMsg]   = useState(null);
   const [fileHandle, setFileHandle] = useState(null);
@@ -678,6 +684,7 @@ function App(){
       ticketsRef.current=[]; shipmentsRef.current=[]; locationsRef.current=[]; requestorsRef.current=[];
       setTickets([]); setShipments([]); setLocations([]); setRequestors([]);
       setCustodyEvents([]);
+      setAppConfig({});
       setFbLoading(false);
       return;
     }
@@ -703,6 +710,8 @@ function App(){
     unsubs.push(repo.subscribeCustodyEvents(function(list){
       setCustodyEvents(list);
     }));
+    // App config (BUILD 4): one-time read - rarely changes, no subscription.
+    repo.getConfig().then(function(cfg){ setAppConfig(cfg||{}); }).catch(function(e){ console.error("config load:", e); });
     return function(){ unsubs.forEach(function(u){ u(); }); };
   }, [user]);
 
@@ -710,6 +719,11 @@ function App(){
   function reportWriteError(op, coll, id, e){
     console.error("Firestore "+op+" error:", e);
     setWriteError({ collection: coll, id: id, op: op, message: (e && e.message) || String(e) });
+  }
+  function saveAppConfig(patch){
+    var next = {...appConfig, ...patch};
+    setAppConfig(next);
+    repo.saveConfig(next).catch(function(e){ reportWriteError("save","config","app",e); });
   }
   // -- Chain-of-custody emission (Option A: wrapper transition detection) --
   // custodyEvents is an APPEND-ONLY audit log (see repo). Events are inferred
@@ -1062,10 +1076,10 @@ function App(){
       </div>
 
       <div style={{maxWidth:1020, margin:"32px auto 0", padding:"0 24px"}}>
-        {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} tickets={tickets} shipments={shipments} onClose={function(){ setShowSettings(false); }} readOnly={!user} onDeleteLocation={removeLocation} onDeleteRequestor={removeRequestor}/>}
+        {showSettings && <SettingsPage locations={locations} setLocations={saveLocations} requestors={requestors} setRequestors={saveRequestors} tickets={tickets} shipments={shipments} appConfig={appConfig} saveAppConfig={saveAppConfig} onClose={function(){ setShowSettings(false); }} readOnly={!user} onDeleteLocation={removeLocation} onDeleteRequestor={removeRequestor}/>}
         {!showSettings && tab===0 && <TicketsTab tickets={tickets} setTickets={saveTickets} setVendorReport={setVendorReport} setTab={setTab} openTicketId={openTicketId} setOpenTicketId={setOpenTicketId} locations={locations} requestors={requestors} custodyEvents={custodyEvents} readOnly={!user} onDeleteTicket={removeTicket}/>}
         {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user} routeOrder={routeOrder} setRouteOrder={setRouteOrder}/>}
-        {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user} openShipmentId={openShipmentId} setOpenShipmentId={setOpenShipmentId} custodyEvents={custodyEvents} onDeleteShipment={removeShipment}/>}
+        {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user} openShipmentId={openShipmentId} setOpenShipmentId={setOpenShipmentId} custodyEvents={custodyEvents} appConfig={appConfig} saveAppConfig={saveAppConfig} onDeleteShipment={removeShipment}/>}
         {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
         {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
         {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId} setOpenShipmentId={setOpenShipmentId}/>}
@@ -1077,7 +1091,7 @@ function App(){
 // ══════════════════════════════════════════════════════════════════
 // SETTINGS PAGE
 // ══════════════════════════════════════════════════════════════════
-function SettingsPage({locations, setLocations, requestors, setRequestors, tickets, shipments, onClose, readOnly, onDeleteLocation, onDeleteRequestor}){
+function SettingsPage({locations, setLocations, requestors, setRequestors, tickets, shipments, appConfig, saveAppConfig, onClose, readOnly, onDeleteLocation, onDeleteRequestor}){
   const [section, setSection] = useState("locations");
 
   // ── Locations ────────────────────────────────────────────────────
@@ -1315,6 +1329,7 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
           tickets={tickets} shipments={shipments}
           locations={locations} setLocations={setLocations}
           requestors={requestors} setRequestors={setRequestors}
+          appConfig={appConfig} saveAppConfig={saveAppConfig}
           readOnly={readOnly}
         />
       )}
@@ -1323,7 +1338,9 @@ function SettingsPage({locations, setLocations, requestors, setRequestors, ticke
 }
 
 
-function DataManagementSection({tickets, shipments, locations, setLocations, requestors, setRequestors, readOnly}){
+function DataManagementSection({tickets, shipments, locations, setLocations, requestors, setRequestors, appConfig, saveAppConfig, readOnly}){
+  const [govEmail, setGovEmail] = useState((appConfig&&appConfig.governanceEmail)||"");
+  useEffect(function(){ setGovEmail((appConfig&&appConfig.governanceEmail)||""); }, [appConfig&&appConfig.governanceEmail]);
   const [showImport, setShowImport]     = useState(false);
   const [importMsg,  setImportMsg]      = useState(null);
   const [preview,    setPreview]        = useState(null); // {locations:[], requestors:[]}
@@ -1428,6 +1445,17 @@ function DataManagementSection({tickets, shipments, locations, setLocations, req
 
   return (
     <div>
+      {/* Governance Manifest destination (custody BUILD 4 stub) */}
+      <div style={cardStyle}>
+        <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:6}}>Governance Manifest</div>
+        <div style={{fontSize:12,color:"#64748b",marginBottom:14}}>Destination email for chain-of-custody manifests (Data Governance). The ✉ Manifest button on a vendor pickup generates a serial-level PDF and opens a pre-filled email to this address — attach the downloaded PDF before sending. Automated sending arrives with the backend tier.</div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+          <input value={govEmail} onChange={function(e){ setGovEmail(e.target.value); }} placeholder="governance@ou.edu" disabled={readOnly}
+            style={{flex:1,minWidth:240,background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit",opacity:readOnly?0.6:1}}/>
+          {!readOnly && <button onClick={function(){ saveAppConfig({governanceEmail: govEmail.trim()}); }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:7,padding:"9px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:500}}>Save</button>}
+        </div>
+      </div>
+
       {/* Download Snapshot */}
       <div style={cardStyle}>
         <div style={{fontFamily:"'Geist',sans-serif",fontWeight:600,fontSize:14,color:"#e2e8f0",marginBottom:6}}>Download Snapshot</div>
@@ -4018,7 +4046,7 @@ var STATUS_META = {
   "reconciled":   {label:"Reconciled",   color:"#86efac", bg:"#052e16", border:"#166534"},
 };
 
-function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorReport, readOnly, openShipmentId, setOpenShipmentId, custodyEvents, onDeleteShipment}){
+function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorReport, readOnly, openShipmentId, setOpenShipmentId, custodyEvents, appConfig, saveAppConfig, onDeleteShipment}){
   const [view, setView]     = useState("list");
   const [editing, setEditing] = useState(null);
   const [logShipment, setLogShipment] = useState(null); // pickup whose custody log is open (BUILD 3)
@@ -4077,6 +4105,69 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
     setShipments(function(prev){ return prev.map(function(x){ return x.id===s.id?updated:x; }); });
   }
 
+  function manifestSerialsFor(t){
+    var list = (t.pickupScanned ? t.assets : t.expectedAssets) || [];
+    return list.map(function(a){ return a && a.serial; }).filter(Boolean);
+  }
+  function governanceManifest(s){
+    var jspdf = window.jspdf || window.jsPDF;
+    if(!jspdf){ alert("PDF library not loaded."); return; }
+    var dest = (appConfig && appConfig.governanceEmail) || "";
+    if(!dest){
+      var entered = prompt("No governance email is configured (Settings > Data Management).\n\nEnter the Data Governance destination email (it will be saved):");
+      if(entered===null) return;
+      entered = entered.trim();
+      if(!entered) return;
+      dest = entered;
+      saveAppConfig({governanceEmail: dest});
+    }
+    var dec = decodePickupNo(s.name);
+    var memberTickets = (s.ticketIds||[]).map(function(tid){ return tickets.find(function(t){ return t.id===tid; }); }).filter(Boolean);
+    var totalSerials = 0;
+    var doc = new jspdf.jsPDF({orientation:"portrait", unit:"pt", format:"letter"});
+    var pageW = doc.internal.pageSize.getWidth();
+    var margin = 40;
+    doc.setFillColor(15,23,42); doc.rect(0,0,pageW,70,"F");
+    doc.setFont("helvetica","bold"); doc.setFontSize(15); doc.setTextColor(241,245,249);
+    doc.text("Chain-of-Custody Manifest", margin, 28);
+    doc.setFont("helvetica","normal"); doc.setFontSize(9); doc.setTextColor(148,163,184);
+    doc.text("Vendor Pickup: "+(s.name||"(no number)")+"   |   Vendor: "+(dec.vendor||s.vendor||"-")+"   |   Location: "+(s.location||"-"), margin, 46);
+    doc.text("Pickup date: "+(s.pickupDate?fmtDate(s.pickupDate):"-")+"   |   PO: "+(s.vendorPO||s.auditPo||"-")+"   |   Generated: "+new Date().toLocaleString(), margin, 60);
+    var y = 92;
+    memberTickets.forEach(function(t){
+      var serials = manifestSerialsFor(t);
+      totalSerials += serials.length;
+      var prov = t.directVendorPickup ? "attested" : (t.pickupScanned ? "scanned" : "expected");
+      var rows = [];
+      for(var i=0; i<serials.length; i+=4){ rows.push([serials.slice(i,i+4).join("      ")]); }
+      if(rows.length===0) rows.push(["(no serials on this ticket)"]);
+      doc.autoTable({
+        startY: y,
+        head: [["Ticket #"+(t.ticketNo||"-")+"   |   "+(t.requestor||"-")+"   |   "+(t.site||"-")+"   |   "+serials.length+" serial"+(serials.length!==1?"s":"")+" ("+prov+")"]],
+        body: rows,
+        margin: {left:margin, right:margin},
+        styles: {font:"courier", fontSize:8, cellPadding:3, textColor:[51,65,85]},
+        headStyles: {fillColor:[30,41,59], textColor:[241,245,249], font:"helvetica", fontStyle:"bold", fontSize:9},
+        theme: "grid"
+      });
+      y = doc.lastAutoTable.finalY + 14;
+    });
+    doc.setFontSize(9); doc.setTextColor(100,116,139);
+    doc.text("Total: "+memberTickets.length+" ticket"+(memberTickets.length!==1?"s":"")+", "+totalSerials+" serials. Serial source per ticket: post-scan verified assets (scanned), requestor-attested expected list (attested), expected list (expected).", margin, y+6, {maxWidth: pageW-2*margin});
+    var fname = "Custody-Manifest-"+(s.name||s.id)+"-"+new Date().toISOString().slice(0,10)+".pdf";
+    doc.save(fname);
+    var subject = "Custody Manifest - "+(s.name||"")+" - "+(dec.vendor||s.vendor||"")+(s.pickupDate?" - picked up "+fmtDate(s.pickupDate):"");
+    var body = "Chain-of-custody manifest for vendor pickup "+(s.name||"")+".\n\n"
+      + "Vendor: "+(dec.vendor||s.vendor||"-")+"\n"
+      + "Location: "+(s.location||"-")+"\n"
+      + "Pickup date: "+(s.pickupDate?fmtDate(s.pickupDate):"-")+"\n"
+      + "PO: "+(s.vendorPO||s.auditPo||"(not yet captured)")+"\n"
+      + "Tickets: "+memberTickets.length+"\n"
+      + "Serials: "+totalSerials+"\n\n"
+      + "The serial-level manifest PDF ("+fname+") was just downloaded - please attach it to this email before sending.\n\n"
+      + "Generated by AssetTrack at "+new Date().toLocaleString()+".";
+    window.open("mailto:"+encodeURIComponent(dest)+"?subject="+encodeURIComponent(subject)+"&body="+encodeURIComponent(body));
+  }
   function logArrival(s){
     var d = prompt("Warehouse arrival date from the vendor receipt email (YYYY-MM-DD):", localDateStr());
     if(d===null) return;
@@ -4140,6 +4231,7 @@ function ShipmentsTab({tickets, setTickets, shipments, setShipments, setVendorRe
                     <button onClick={function(){ logArrival(s); }} style={{background:"#0f172a",color:"#a78bfa",border:"1px solid #4c1d95",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>Log Arrival</button>
                   )}
                   <button onClick={function(){ setLogShipment(s); }} style={{background:"#0f172a",color:"#94a3b8",border:"1px solid #334155",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>📋 Log</button>
+                  {!readOnly && <button onClick={function(){ governanceManifest(s); }} style={{background:"#0f172a",color:"#5eead4",border:"1px solid #115e59",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>✉ Manifest</button>}
                   <button onClick={function(){ openEdit(s); }} style={{background:"#0f172a",color:readOnly?"#475569":"#93c5fd",border:"1px solid "+(readOnly?"#334155":"#1e3a5f"),borderRadius:7,padding:"7px 16px",cursor:"pointer",fontSize:12,fontFamily:"inherit"}}>{readOnly?"View":"Edit"}</button>
                   {!readOnly && <button onClick={function(){ del(s.id); }} style={{background:"#0f172a",color:"#ef4444",border:"1px solid #450a0a",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:12}}>✕</button>}
                 </div>
