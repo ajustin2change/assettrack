@@ -743,6 +743,25 @@ function App(){
     if(!userRef.current) return;
     repo.saveDiscrepancy(d).catch(function(e){ reportWriteError("save","discrepancies",d.id,e); });
   }
+  // Track button (BUILD D3): manual promotion of a vendor extra into the
+  // tracker - the ONE type where only the operator can judge pertinence,
+  // so it never auto-opens (see harvest note).
+  function trackExtra(report, item){
+    if(!userRef.current || !report || !item) return;
+    var s = (shipmentsRef.current||[]).find(function(x){ return x.reconcileReport && x.reconcileReport.generatedAt===report.generatedAt; });
+    if(!s){ alert("Couldn't find the pickup this report belongs to. Re-run the reconcile, then track from the fresh report."); return; }
+    var id = dxId(s.id, "extra", item.serial);
+    if((discrepanciesRef.current||[]).some(function(d){ return d.id===id; })) return;
+    var now = new Date().toISOString();
+    repo.saveDiscrepancy({ id:id, v:1, type:"extra", serial:item.serial,
+      ticketNo:"", ticketId:"",
+      pickupId:s.id, pickupName:s.name||s.id,
+      state:"open", openedAt:now, lastSeenAt:now,
+      notes:[dxNote(userRef.current.email||"user","Tracked from the report's Extra list ("+(report.fileName||"")+")")],
+      evidence:{ vendorTag:item.vendorTag||"", vendorDesc:item.vendorDesc||"", vendorMfgr:item.vendorMfgr||"" },
+      resolution:null
+    }).catch(function(e){ reportWriteError("save","discrepancies",id,e); });
+  }
   // -- Chain-of-custody emission (Option A: wrapper transition detection) --
   // custodyEvents is an APPEND-ONLY audit log (see repo). Events are inferred
   // from state transitions inside saveTickets / saveShipments because EVERY
@@ -1184,7 +1203,7 @@ function App(){
         {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user} routeOrder={routeOrder} setRouteOrder={setRouteOrder}/>}
         {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user} openShipmentId={openShipmentId} setOpenShipmentId={setOpenShipmentId} custodyEvents={custodyEvents} appConfig={appConfig} saveAppConfig={saveAppConfig} onDeleteShipment={removeShipment}/>}
         {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
-        {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
+        {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab} discrepancies={discrepancies} onTrackExtra={trackExtra} readOnly={!user}/>}
         {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId} setOpenShipmentId={setOpenShipmentId}/>}
         {!showSettings && tab===6 && <DiscrepanciesTab discrepancies={discrepancies} onSave={updateDiscrepancy} userEmail={user&&user.email?user.email:""} readOnly={!user}/>}
       </div>
@@ -5395,6 +5414,7 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
                       <th style={{textAlign:"left",padding:"6px 10px",color:"#475569",fontWeight:500}}>Manufacturer</th>
                       <th style={{textAlign:"left",padding:"6px 10px",color:"#475569",fontWeight:500}}>Description</th>
                       <th style={{textAlign:"left",padding:"6px 10px",color:"#475569",fontWeight:500}}>Asset Tag</th>
+                      <th style={{textAlign:"left",padding:"6px 10px",color:"#475569",fontWeight:500}}>Track</th>
                     </tr></thead>
                     <tbody>
                       {report.extraFromVendor.slice().sort(function(a,b){ return (a.serial||'').localeCompare(b.serial||''); }).map(function(item,i){
@@ -5403,6 +5423,14 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
                           <td style={{padding:"6px 10px",color:"#94a3b8",fontSize:11}}>{item.vendorMfgr||"—"}</td>
                           <td style={{padding:"6px 10px",color:"#94a3b8",fontSize:11}}>{item.vendorDesc||"—"}</td>
                           <td style={{padding:"6px 10px",color:"#a78bfa",fontSize:11}}>{item.vendorTag&&item.vendorTag.replace(/NO ASSET TAG\s*/i,"").trim()||"—"}</td>
+                          <td style={{padding:"6px 10px"}}>
+                            {(function(){
+                              var tracked = (discrepancies||[]).some(function(d){ return d.type==="extra" && d.serial===item.serial && d.pickupName===report.pickupNo; });
+                              if(tracked) return <span style={{fontSize:11,color:"#86efac"}}>Tracked ✓</span>;
+                              if(readOnly || !onTrackExtra) return null;
+                              return <button onClick={function(){ onTrackExtra(report, item); }} className="resolve-btn" style={{background:"#3b0764",color:"#d8b4fe",border:"1px solid #6b21a8",borderRadius:6,padding:"3px 10px",fontSize:11,fontFamily:"inherit",cursor:"pointer"}}>Track</button>;
+                            })()}
+                          </td>
                         </tr>;
                       })}
                     </tbody>
@@ -5478,7 +5506,7 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
 // ══════════════════════════════════════════════════════════════════
 // TAB 5 — REPORT
 // ══════════════════════════════════════════════════════════════════
-function ReportTab({report, tickets, shipments, setTab}){
+function ReportTab({report, tickets, shipments, setTab, discrepancies, onTrackExtra, readOnly}){
   var today = new Date();
   var allDates = tickets.map(function(t){ return t.date; }).filter(Boolean).sort();
   var defaultFrom = allDates.length ? allDates[0] : new Date(today.getFullYear(), today.getMonth()-5, 1).toISOString().slice(0,10);
