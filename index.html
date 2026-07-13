@@ -743,12 +743,6 @@ function App(){
     if(!userRef.current) return;
     repo.saveDiscrepancy(d).catch(function(e){ reportWriteError("save","discrepancies",d.id,e); });
   }
-  // Seed = the SAME harvest with "no previous report" as prev: every stored
-  // reconcile report harvests once; deterministic ids make it idempotent.
-  function seedDiscrepancies(){
-    var list = shipmentsRef.current || [];
-    harvestDiscrepancies(list.map(function(s){ return { id:s.id, reconcileReport:null }; }), list);
-  }
   // -- Chain-of-custody emission (Option A: wrapper transition detection) --
   // custodyEvents is an APPEND-ONLY audit log (see repo). Events are inferred
   // from state transitions inside saveTickets / saveShipments because EVERY
@@ -891,8 +885,14 @@ function App(){
             notes:[dxNote("system","Opened by reconcile of "+file)],
             evidence:evidence||{}, resolution:null });
         } else if(d.state==="resolved"){
-          save(Object.assign({}, d, { state:"open", resolution:null, lastSeenAt:now,
-            notes:(d.notes||[]).concat(dxNote("system","Reappeared on reconcile of "+file+(d.resolution&&d.resolution.reason?" (was resolved: "+d.resolution.reason+")":""))) }));
+          // Automation may only reopen what automation closed. A HUMAN
+          // resolution (vendor email, judgment call) is not contradicted by
+          // a report that merely still lists the serial - only system-
+          // resolved records reopen on new evidence.
+          if(d.resolution && d.resolution.resolvedBy==="system"){
+            save(Object.assign({}, d, { state:"open", resolution:null, lastSeenAt:now,
+              notes:(d.notes||[]).concat(dxNote("system","Reappeared on reconcile of "+file+(d.resolution&&d.resolution.reason?" (was resolved: "+d.resolution.reason+")":""))) }));
+          }
         } else {
           save(Object.assign({}, d, { lastSeenAt:now }));
         }
@@ -1186,7 +1186,7 @@ function App(){
         {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
         {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
         {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId} setOpenShipmentId={setOpenShipmentId}/>}
-        {!showSettings && tab===6 && <DiscrepanciesTab discrepancies={discrepancies} shipments={shipments} onSave={updateDiscrepancy} onSeed={seedDiscrepancies} userEmail={user&&user.email?user.email:""} readOnly={!user}/>}
+        {!showSettings && tab===6 && <DiscrepanciesTab discrepancies={discrepancies} onSave={updateDiscrepancy} userEmail={user&&user.email?user.email:""} readOnly={!user}/>}
       </div>
     </div>
   );
@@ -5799,7 +5799,7 @@ function dxAgeDays(d){
 }
 function dxFmtDate(iso){ var t = Date.parse(iso||""); return isNaN(t) ? "" : new Date(t).toLocaleDateString(); }
 
-function DiscrepanciesTab({discrepancies, shipments, onSave, onSeed, userEmail, readOnly}){
+function DiscrepanciesTab({discrepancies, onSave, userEmail, readOnly}){
   const [fType, setFType]               = useState("");
   const [fState, setFState]             = useState("");
   const [fPickup, setFPickup]           = useState("");
@@ -5838,15 +5838,6 @@ function DiscrepanciesTab({discrepancies, shipments, onSave, onSeed, userEmail, 
     (discrepancies||[]).forEach(function(d){ c[d.state] = (c[d.state]||0)+1; });
     return c;
   }, [discrepancies]);
-  const seedable = (shipments||[]).some(function(s){ return s.reconcileReport && s.reconcileReport.generatedAt; });
-  // Pickups with a stored report but no tracked records yet. A genuinely
-  // clean audit keeps counting (no harvest marker exists) - seeding it is a
-  // harmless no-op, so the button over-offers rather than under-offers.
-  const unharvested = useMemo(function(){
-    var have = {};
-    (discrepancies||[]).forEach(function(d){ have[d.pickupId] = true; });
-    return (shipments||[]).filter(function(s){ return s.reconcileReport && s.reconcileReport.generatedAt && !have[s.id]; }).length;
-  }, [discrepancies, shipments]);
   const copyable = useMemo(function(){
     var seen = {}, out = [];
     list.forEach(function(d){ if(d.state!=="resolved" && d.serial && !seen[d.serial]){ seen[d.serial]=true; out.push(d.serial); } });
@@ -5922,14 +5913,8 @@ function DiscrepanciesTab({discrepancies, shipments, onSave, onSeed, userEmail, 
       <div style={{display:"flex", alignItems:"baseline", gap:14, flexWrap:"wrap"}}>
         <h2 style={{fontSize:18, fontWeight:600, color:"#e2e8f0"}}>Discrepancies</h2>
         <span style={{fontSize:12, color:"#64748b"}}>{counts.open} open &middot; {counts.chasing} chasing &middot; {counts.resolved} resolved</span>
-        {unharvested>0 && !readOnly && (discrepancies||[]).length>0 && (
-          <button onClick={onSeed} title="Harvests stored reconcile reports into the tracker. Already-tracked pickups are unaffected - safe to run any time." className="resolve-btn" style={{
-            marginLeft:"auto", background:"#172554", color:"#93c5fd", border:"1px solid #1e40af",
-            borderRadius:6, padding:"5px 14px", fontSize:12, fontFamily:"inherit", cursor:"pointer"
-          }}>{"Seed stored reports ("+unharvested+")"}</button>
-        )}
         <button onClick={copySerials} disabled={!copyable.length} className="resolve-btn" style={{
-          marginLeft:(unharvested>0 && !readOnly && (discrepancies||[]).length>0) ? 0 : "auto", background:copied?"#052e16":"#172554", color:copied?"#86efac":"#93c5fd",
+          marginLeft:"auto", background:copied?"#052e16":"#172554", color:copied?"#86efac":"#93c5fd",
           border:"1px solid "+(copied?"#166534":"#1e40af"), borderRadius:6, padding:"5px 14px",
           fontSize:12, fontFamily:"inherit", cursor:copyable.length?"pointer":"default", opacity:copyable.length?1:0.4
         }}>{copied ? "Copied \u2713" : "Copy open serials ("+copyable.length+")"}</button>
@@ -5959,15 +5944,7 @@ function DiscrepanciesTab({discrepancies, shipments, onSave, onSeed, userEmail, 
       {list.length===0 && (
         <div style={{textAlign:"center", padding:"48px 20px", color:"#64748b", border:"1px dashed #334155", borderRadius:10}}>
           {(discrepancies||[]).length===0 ? (
-            <div>
-              <div style={{fontSize:14, marginBottom:8}}>No discrepancies tracked yet.</div>
-              {seedable && !readOnly && (
-                <div>
-                  <div style={{fontSize:12, marginBottom:14}}>Seed the tracker from the reconcile reports already stored on your pickups. Safe to run more than once &mdash; seeding is idempotent.</div>
-                  <button onClick={onSeed} className="resolve-btn" style={{background:"#1d4ed8", color:"#fff", border:"none", borderRadius:6, padding:"8px 18px", fontSize:13, fontFamily:"inherit", cursor:"pointer"}}>Seed from stored reports</button>
-                </div>
-              )}
-            </div>
+            <div style={{fontSize:14}}>No discrepancies tracked yet. Records appear automatically when a reconcile reports problems.</div>
           ) : (
             <div style={{fontSize:13}}>Nothing matches the current filters.</div>
           )}
@@ -5988,9 +5965,7 @@ function DiscrepanciesTab({discrepancies, shipments, onSave, onSeed, userEmail, 
               <span style={{marginLeft:"auto", fontSize:11, color:"#64748b"}}>
                 {d.state==="resolved" ? ("resolved "+dxFmtDate(d.resolution&&d.resolution.at)) : (age===null ? "" : ("open "+age+(age===1?" day":" days")))}
               </span>
-              <button className="pill resolve-btn" title={d.state==="resolved" ? "" : "Click to toggle Open / Chasing"} onClick={function(ev){ ev.stopPropagation(); cycleState(d); }} style={{
-                background:S.bg, color:S.text, border:"1px solid "+S.border, cursor:(readOnly||d.state==="resolved")?"default":"pointer", fontFamily:"inherit"
-              }}>{S.label}</button>
+              <span className="pill" style={{background:S.bg, color:S.text, border:"1px solid "+S.border}}>{S.label}</span>
             </div>
             {isOpen && (
               <div style={{borderTop:"1px solid #1e293b", padding:"12px 16px", display:"flex", flexDirection:"column", gap:12}}>
@@ -6023,7 +5998,12 @@ function DiscrepanciesTab({discrepancies, shipments, onSave, onSeed, userEmail, 
                   </div>
                 )}
                 {!readOnly && d.state!=="resolved" && resolvingId!==d.id && (
-                  <div>
+                  <div style={{display:"flex", gap:8}}>
+                    <button onClick={function(){ cycleState(d); }} className="resolve-btn" style={{
+                      background:d.state==="open"?"#422006":"#1e293b", color:d.state==="open"?"#fde047":"#94a3b8",
+                      border:"1px solid "+(d.state==="open"?"#713f12":"#334155"),
+                      borderRadius:6, padding:"6px 16px", fontSize:12, fontFamily:"inherit", cursor:"pointer"
+                    }}>{d.state==="open" ? "Mark as Chasing" : "Back to Open"}</button>
                     <button onClick={function(){ setResolvingId(d.id); setReasonCode(""); setResolveNote(""); }} className="resolve-btn" style={{background:"#052e16", color:"#86efac", border:"1px solid #166534", borderRadius:6, padding:"6px 16px", fontSize:12, fontFamily:"inherit", cursor:"pointer"}}>Resolve&hellip;</button>
                   </div>
                 )}
