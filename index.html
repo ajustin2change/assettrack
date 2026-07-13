@@ -58,6 +58,10 @@
         clean.recordedAt = firebase.firestore.FieldValue.serverTimestamp();
         return db.collection("custodyEvents").doc(ev.id).set(clean);
       },
+      // -- Discrepancy tracker (BUILD D1): living records - update allowed,
+      // delete deliberately absent (resolved, never removed; rules agree).
+      subscribeDiscrepancies: function(cb){ return db.collection("discrepancies").onSnapshot(function(s){ cb(repoSnapToList(s)); }); },
+      saveDiscrepancy:        function(d){ return repoSet("discrepancies", d); },
       // -- App config: ONE small key-value doc (config/app), e.g. the
       // governance-manifest destination email (BUILD 4). Read once at
       // sign-in. Owner-write under the wildcard rule like everything else.
@@ -647,6 +651,8 @@ function App(){
   const [tickets, setTickets]       = useState([]);
   const [shipments, setShipments]   = useState([]);
   const [custodyEvents, setCustodyEvents] = useState([]); // read-only display of the append-only log (BUILD 3); no ref - never diffed, never written from state
+  const [discrepancies, setDiscrepancies] = useState([]); // discrepancy tracker (BUILD D1); ref exists because the harvest reads it synchronously inside saveShipments
+  const discrepanciesRef = useRef([]);
   const [appConfig, setAppConfig] = useState({}); // small settings doc (BUILD 4): { governanceEmail }
   const [vendorReport, setVendorReport] = useState(null);
   const [importMsg, setImportMsg]   = useState(null);
@@ -709,6 +715,12 @@ function App(){
     // repo.saveCustodyEvent in the emission layer.
     unsubs.push(repo.subscribeCustodyEvents(function(list){
       setCustodyEvents(list);
+    }));
+    // Discrepancies (BUILD D1): like custodyEvents, NEVER part of session
+    // JSON / hydrateAll / pushToFirestore. Writes go only through the
+    // harvest below and (later) the tracker UI.
+    unsubs.push(repo.subscribeDiscrepancies(function(list){
+      discrepanciesRef.current = list; setDiscrepancies(list);
     }));
     // App config (BUILD 4): one-time read - rarely changes, no subscription.
     repo.getConfig().then(function(cfg){ setAppConfig(cfg||{}); }).catch(function(e){ console.error("config load:", e); });
@@ -830,6 +842,82 @@ function App(){
       }
     });
   }
+  // -- Discrepancy harvest (BUILD D1) -- one record per (pickup, type, serial).
+  // Rides the wrapper-transition pattern like custody: fires when a pickup's
+  // reconcileReport.generatedAt changes (first reconcile AND re-runs), so
+  // backfilled audits feed the tracker automatically. Extras are NEVER
+  // auto-opened (the vendor reports serials we do not track); they are
+  // promoted by hand from the report view. State follows evidence both ways:
+  // cleared items auto-resolve as the SYSTEM's act; resolved items that
+  // reappear auto-reopen.
+  function dxKeyPart(s){ return String(s||"").toUpperCase().replace(/[^A-Z0-9_-]/g, function(c){ return "~"+c.charCodeAt(0).toString(16); }); }
+  function dxId(pickupId, type, serial){ return "dx_"+pickupId+"_"+type+"_"+dxKeyPart(serial); }
+  function dxNote(by, text){ return { at: new Date().toISOString(), by: by, text: text }; }
+  function harvestDiscrepancies(prev, next){
+    var prevById = {};
+    prev.forEach(function(s){ prevById[s.id] = s; });
+    next.forEach(function(s){
+      var R = s.reconcileReport;
+      var old = prevById[s.id];
+      var oldGen = (old && old.reconcileReport && old.reconcileReport.generatedAt) || "";
+      if(!R || !R.generatedAt || R.generatedAt === oldGen) return;
+      var now = new Date().toISOString();
+      var file = R.fileName || s.auditFileName || "";
+      var existing = {};
+      (discrepanciesRef.current||[]).forEach(function(d){ existing[d.id] = d; });
+      var present = {};
+      function save(doc){ repo.saveDiscrepancy(doc).catch(function(e){ reportWriteError("save","discrepancies",doc.id,e); }); }
+      function upsert(type, serial, ticketNo, ticketId, evidence){
+        var id = dxId(s.id, type, serial);
+        present[id] = true;
+        var d = existing[id];
+        if(!d){
+          save({ id:id, v:1, type:type, serial:serial,
+            ticketNo:ticketNo||"", ticketId:ticketId||"",
+            pickupId:s.id, pickupName:s.name||s.id,
+            state:"open", openedAt:now, lastSeenAt:now,
+            notes:[dxNote("system","Opened by reconcile of "+file)],
+            evidence:evidence||{}, resolution:null });
+        } else if(d.state==="resolved"){
+          save(Object.assign({}, d, { state:"open", resolution:null, lastSeenAt:now,
+            notes:(d.notes||[]).concat(dxNote("system","Reappeared on reconcile of "+file+(d.resolution&&d.resolution.reason?" (was resolved: "+d.resolution.reason+")":""))) }));
+        } else {
+          save(Object.assign({}, d, { lastSeenAt:now }));
+        }
+      }
+      (R.missingFromVendor||[]).forEach(function(a){
+        upsert("missing", a.serial, a.ticketNo, a.ticketId,
+          { ourTag:a.ouInventory||"", manufacturer:a.manufacturer||"", machineType:a.machineType||"", site:a.site||"" });
+      });
+      (R.tagMismatch||[]).forEach(function(a){
+        upsert("tag-mismatch", a.serial, a.ticketNo, a.ticketId,
+          { ourTag:a.ouInventory||"", vendorTag:a.vendorTag||"", vendorSerial:a.vendorSerial||"", vendorDesc:a.vendorDesc||"" });
+      });
+      (R.crossTicketMatches||[]).forEach(function(m){
+        upsert("cross-ticket", m.serial, m.ticketNo, m.ticketId,
+          { vendorTag:m.vendorTag||"", vendorDesc:m.vendorDesc||"", ourTag:m.ouInventory||"" });
+      });
+      (R.duplicateAuditMatches||[]).forEach(function(m){
+        upsert("duplicate-audit", m.serial, m.ticketNo, m.ticketId,
+          { otherPickup:m.otherPickup||"", otherAudit:m.otherAudit||"", vendorSerial:m.vendorSerial||"" });
+      });
+      // Promoted extras count as present while the serial is still listed as
+      // an extra, so this run does not auto-resolve them.
+      (R.extraFromVendor||[]).forEach(function(x){ present[dxId(s.id,"extra",x.serial)] = true; });
+      var waived = {};
+      (R.waivedSerials||[]).forEach(function(w){ waived[String(w).toUpperCase()] = true; });
+      (discrepanciesRef.current||[]).forEach(function(d){
+        if(d.pickupId!==s.id || d.state==="resolved" || present[d.id]) return;
+        var wasWaived = waived[String(d.serial||"").toUpperCase()];
+        var reason = wasWaived ? "waived" : "cleared-by-re-reconcile";
+        var text = wasWaived ? "Waived by operator; reconcile of "+file+" excluded this serial"
+                             : "Re-reconcile of "+file+" no longer reports this "+d.type;
+        save(Object.assign({}, d, { state:"resolved", lastSeenAt:now,
+          resolution:{ reason:reason, note:text, resolvedBy:"system", at:now },
+          notes:(d.notes||[]).concat(dxNote("system",text)) }));
+      });
+    });
+  }
   // UPSERT-ONLY: writes changed/added items, NEVER deletes. Deletion is
   // explicit (remove* below), so a filtered/subset array can no longer
   // silently mass-delete. Runs OUTSIDE the React updater (uses *Ref.current
@@ -858,6 +946,7 @@ function App(){
     if(userRef.current){
       upsertList(prev, next, repo.saveShipment, "shipments");
       detectShipmentCustody(prev, next); // chain-of-custody (see emitCustody)
+      harvestDiscrepancies(prev, next);  // discrepancy tracker (BUILD D1)
     }
   }
   function saveLocations(updaterOrArray){
