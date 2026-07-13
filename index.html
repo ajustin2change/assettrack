@@ -156,7 +156,7 @@ function generateApprovalSheet(ticket, resolved){
   return rows.length;
 }
 
-const TABS = ["Tickets","Pickup Scan","Vendor Pickup","Reconcile","Report","Audit X-Ref"];
+const TABS = ["Tickets","Pickup Scan","Vendor Pickup","Reconcile","Report","Audit X-Ref","Discrepancies"];
 
 // ── Helpers ───────────────────────────────────────────────────────
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
@@ -737,6 +737,18 @@ function App(){
     setAppConfig(next);
     repo.saveConfig(next).catch(function(e){ reportWriteError("save","config","app",e); });
   }
+  // -- Discrepancy tracker (BUILD D2): direct repo writes - discrepancies
+  // are NOT session state (see the subscription note), so no save wrapper.
+  function updateDiscrepancy(d){
+    if(!userRef.current) return;
+    repo.saveDiscrepancy(d).catch(function(e){ reportWriteError("save","discrepancies",d.id,e); });
+  }
+  // Seed = the SAME harvest with "no previous report" as prev: every stored
+  // reconcile report harvests once; deterministic ids make it idempotent.
+  function seedDiscrepancies(){
+    var list = shipmentsRef.current || [];
+    harvestDiscrepancies(list.map(function(s){ return { id:s.id, reconcileReport:null }; }), list);
+  }
   // -- Chain-of-custody emission (Option A: wrapper transition detection) --
   // custodyEvents is an APPEND-ONLY audit log (see repo). Events are inferred
   // from state transitions inside saveTickets / saveShipments because EVERY
@@ -1085,6 +1097,7 @@ function App(){
 
   const needsReviewCount = useMemo(function(){ return tickets.filter(function(t){ return pickupStatus(t)==="awaiting-approval"; }).length; }, [tickets]);
   const pendingCount     = useMemo(function(){ return tickets.filter(function(t){ return pickupStatus(t)==="pending"&&(t.expectedAssets||[]).length>0; }).length; }, [tickets]);
+  const openDxCount      = useMemo(function(){ return discrepancies.filter(function(d){ return d.state!=="resolved"; }).length; }, [discrepancies]);
 
   return (
     <div style={{minHeight:"100vh", background:"#0f172a", paddingBottom:60}}>
@@ -1157,6 +1170,7 @@ function App(){
                   {i===0 && tickets.length>0 && <span style={{marginLeft:6,background:"#1e40af",color:"#93c5fd",borderRadius:999,padding:"1px 6px",fontSize:10}}>{tickets.length}</span>}
                   {i===1 && pendingCount>0 && <span style={{marginLeft:6,background:"#1e3a5f",color:"#93c5fd",borderRadius:999,padding:"1px 6px",fontSize:10}}>{pendingCount}</span>}
                   {i===2 && shipments.length>0 && <span style={{marginLeft:6,background:"#1e40af",color:"#93c5fd",borderRadius:999,padding:"1px 6px",fontSize:10}}>{shipments.length}</span>}
+                  {i===6 && openDxCount>0 && <span style={{marginLeft:6,background:"#7f1d1d",color:"#fca5a5",borderRadius:999,padding:"1px 6px",fontSize:10}}>{openDxCount}</span>}
                 </button>
               );
             })}
@@ -1172,6 +1186,7 @@ function App(){
         {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
         {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
         {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId} setOpenShipmentId={setOpenShipmentId}/>}
+        {!showSettings && tab===6 && <DiscrepanciesTab discrepancies={discrepancies} shipments={shipments} onSave={updateDiscrepancy} onSeed={seedDiscrepancies} userEmail={user&&user.email?user.email:""} readOnly={!user}/>}
       </div>
     </div>
   );
@@ -5750,6 +5765,301 @@ function ReportTab({report, tickets, shipments, setTab}){
   );
 }
 
+
+// ── Discrepancy tracker UI (BUILD D2) ──────────────────────────────
+// Severity IS the type: rank orders the list worst-first, no manual ranking.
+const DX_TYPES = {
+  "missing":         { label:"Missing from Vendor", rank:1, stripe:"#ef4444", bg:"#450a0a", text:"#fca5a5", border:"#7f1d1d" },
+  "cross-ticket":    { label:"Cross-Ticket",        rank:2, stripe:"#f97316", bg:"#431407", text:"#fdba74", border:"#7c2d12" },
+  "duplicate-audit": { label:"Duplicate Audit",     rank:3, stripe:"#eab308", bg:"#422006", text:"#fde047", border:"#713f12" },
+  "extra":           { label:"Extra from Vendor",   rank:4, stripe:"#a855f7", bg:"#3b0764", text:"#d8b4fe", border:"#6b21a8" },
+  "tag-mismatch":    { label:"Tag Mismatch",        rank:5, stripe:"#38bdf8", bg:"#082f49", text:"#7dd3fc", border:"#075985" }
+};
+const DX_STATES = {
+  open:     { label:"Open",     bg:"#450a0a", text:"#fca5a5", border:"#7f1d1d" },
+  chasing:  { label:"Chasing",  bg:"#422006", text:"#fde047", border:"#713f12" },
+  resolved: { label:"Resolved", bg:"#052e16", text:"#86efac", border:"#166534" }
+};
+const DX_REASONS = [
+  { code:"found-later-audit", label:"Found on later audit" },
+  { code:"vendor-serial",     label:"Vendor-created serial" },
+  { code:"vendor-confirmed",  label:"Vendor confirmed after inquiry" },
+  { code:"our-data-error",    label:"Our data error" },
+  { code:"never-left",        label:"Never left the building" },
+  { code:"other",             label:"Other (note required)" }
+];
+const DX_REASON_LABELS = (function(){
+  var m = { "cleared-by-re-reconcile":"Cleared by re-reconcile", "waived":"Waived" };
+  DX_REASONS.forEach(function(r){ m[r.code] = r.label; });
+  return m;
+})();
+function dxAgeDays(d){
+  var t = Date.parse(d.openedAt||""); if(isNaN(t)) return null;
+  return Math.max(0, Math.floor((Date.now()-t)/86400000));
+}
+function dxFmtDate(iso){ var t = Date.parse(iso||""); return isNaN(t) ? "" : new Date(t).toLocaleDateString(); }
+
+function DiscrepanciesTab({discrepancies, shipments, onSave, onSeed, userEmail, readOnly}){
+  const [fType, setFType]               = useState("");
+  const [fState, setFState]             = useState("");
+  const [fPickup, setFPickup]           = useState("");
+  const [showResolved, setShowResolved] = useState(false);
+  const [expandedId, setExpandedId]     = useState(null);
+  const [resolvingId, setResolvingId]   = useState(null);
+  const [reasonCode, setReasonCode]     = useState("");
+  const [resolveNote, setResolveNote]   = useState("");
+  const [noteDraft, setNoteDraft]       = useState("");
+  const [copied, setCopied]             = useState(false);
+
+  const pickupNames = useMemo(function(){
+    var seen = {};
+    (discrepancies||[]).forEach(function(d){ if(d.pickupName) seen[d.pickupName] = true; });
+    return Object.keys(seen).sort();
+  }, [discrepancies]);
+
+  const list = useMemo(function(){
+    var out = (discrepancies||[]).filter(function(d){
+      if(fType && d.type!==fType) return false;
+      if(fPickup && d.pickupName!==fPickup) return false;
+      if(fState) return d.state===fState;
+      if(d.state==="resolved" && !showResolved) return false;
+      return true;
+    });
+    out.sort(function(a,b){
+      var ra = (DX_TYPES[a.type]||{}).rank||9, rb = (DX_TYPES[b.type]||{}).rank||9;
+      if(ra!==rb) return ra-rb;
+      return String(a.openedAt||"").localeCompare(String(b.openedAt||""));
+    });
+    return out;
+  }, [discrepancies, fType, fState, fPickup, showResolved]);
+
+  const counts = useMemo(function(){
+    var c = { open:0, chasing:0, resolved:0 };
+    (discrepancies||[]).forEach(function(d){ c[d.state] = (c[d.state]||0)+1; });
+    return c;
+  }, [discrepancies]);
+  const seedable = (shipments||[]).some(function(s){ return s.reconcileReport && s.reconcileReport.generatedAt; });
+  // Pickups with a stored report but no tracked records yet. A genuinely
+  // clean audit keeps counting (no harvest marker exists) - seeding it is a
+  // harmless no-op, so the button over-offers rather than under-offers.
+  const unharvested = useMemo(function(){
+    var have = {};
+    (discrepancies||[]).forEach(function(d){ have[d.pickupId] = true; });
+    return (shipments||[]).filter(function(s){ return s.reconcileReport && s.reconcileReport.generatedAt && !have[s.id]; }).length;
+  }, [discrepancies, shipments]);
+  const copyable = useMemo(function(){
+    var seen = {}, out = [];
+    list.forEach(function(d){ if(d.state!=="resolved" && d.serial && !seen[d.serial]){ seen[d.serial]=true; out.push(d.serial); } });
+    return out;
+  }, [list]);
+
+  function stamp(){ return new Date().toISOString(); }
+  function withNote(d, text, patch){
+    return Object.assign({}, d, patch||{}, { notes:(d.notes||[]).concat({ at:stamp(), by:(userEmail||"user"), text:text }) });
+  }
+  function cycleState(d){
+    if(readOnly || d.state==="resolved") return;
+    var next = d.state==="open" ? "chasing" : "open";
+    onSave(withNote(d, next==="chasing" ? "Marked chasing" : "Marked open", { state:next }));
+  }
+  function submitResolve(d){
+    if(!reasonCode) return;
+    if(reasonCode==="other" && !resolveNote.trim()) return;
+    var label = DX_REASON_LABELS[reasonCode]||reasonCode;
+    onSave(withNote(d, "Resolved: "+label+(resolveNote.trim() ? " - "+resolveNote.trim() : ""), {
+      state:"resolved",
+      resolution:{ reason:reasonCode, note:resolveNote.trim(), resolvedBy:"user", at:stamp() }
+    }));
+    setResolvingId(null); setReasonCode(""); setResolveNote("");
+  }
+  function reopen(d){
+    if(readOnly) return;
+    var was = d.resolution && d.resolution.reason ? (DX_REASON_LABELS[d.resolution.reason]||d.resolution.reason) : "";
+    onSave(withNote(d, "Reopened by operator"+(was ? " (was resolved: "+was+")" : ""), { state:"open", resolution:null }));
+  }
+  function addNote(d){
+    var t = noteDraft.trim(); if(!t) return;
+    onSave(withNote(d, t)); setNoteDraft("");
+  }
+  function copySerials(){
+    if(!copyable.length) return;
+    navigator.clipboard.writeText(copyable.join("\n")).then(function(){
+      setCopied(true); setTimeout(function(){ setCopied(false); }, 1600);
+    });
+  }
+  function chip(label, active, onClick, colors){
+    return (
+      <button key={label} onClick={onClick} className="tab-btn" style={{
+        background: active ? ((colors&&colors.bg)||"#1d4ed8") : "transparent",
+        color: active ? ((colors&&colors.text)||"#fff") : "#64748b",
+        border: "1px solid "+(active ? ((colors&&colors.border)||"#3b82f6") : "#334155"),
+        borderRadius:999, padding:"3px 12px", fontSize:11, fontFamily:"inherit"
+      }}>{label}</button>
+    );
+  }
+  function evRow(k, v){
+    if(v===undefined || v===null || v==="") return null;
+    return (
+      <div key={k} style={{display:"flex", gap:8, fontSize:12}}>
+        <span style={{color:"#64748b", minWidth:140}}>{k}</span>
+        <span style={{color:"#cbd5e1", fontFamily:"'Geist Mono',monospace"}}>{String(v)}</span>
+      </div>
+    );
+  }
+  function evidenceBlock(d){
+    var e = d.evidence||{};
+    var rows;
+    if(d.type==="tag-mismatch")       rows = [evRow("Our tag", e.ourTag||"(blank)"), evRow("Vendor tag", e.vendorTag||"(blank)"), evRow("Vendor serial", e.vendorSerial), evRow("Vendor description", e.vendorDesc)];
+    else if(d.type==="cross-ticket")  rows = [evRow("Belongs to ticket", d.ticketNo||"?"), evRow("Vendor tag", e.vendorTag), evRow("Vendor description", e.vendorDesc)];
+    else if(d.type==="duplicate-audit") rows = [evRow("Also on pickup", e.otherPickup), evRow("Other audit file", e.otherAudit)];
+    else if(d.type==="missing")       rows = [evRow("Our tag", e.ourTag), evRow("Manufacturer", e.manufacturer), evRow("Machine type", e.machineType), evRow("Site", e.site)];
+    else rows = Object.keys(e).map(function(k){ return evRow(k, e[k]); });
+    return <div style={{display:"flex", flexDirection:"column", gap:4}}>{rows}</div>;
+  }
+
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:14}}>
+      <div style={{display:"flex", alignItems:"baseline", gap:14, flexWrap:"wrap"}}>
+        <h2 style={{fontSize:18, fontWeight:600, color:"#e2e8f0"}}>Discrepancies</h2>
+        <span style={{fontSize:12, color:"#64748b"}}>{counts.open} open &middot; {counts.chasing} chasing &middot; {counts.resolved} resolved</span>
+        {unharvested>0 && !readOnly && (discrepancies||[]).length>0 && (
+          <button onClick={onSeed} title="Harvests stored reconcile reports into the tracker. Already-tracked pickups are unaffected - safe to run any time." className="resolve-btn" style={{
+            marginLeft:"auto", background:"#172554", color:"#93c5fd", border:"1px solid #1e40af",
+            borderRadius:6, padding:"5px 14px", fontSize:12, fontFamily:"inherit", cursor:"pointer"
+          }}>{"Seed stored reports ("+unharvested+")"}</button>
+        )}
+        <button onClick={copySerials} disabled={!copyable.length} className="resolve-btn" style={{
+          marginLeft:(unharvested>0 && !readOnly && (discrepancies||[]).length>0) ? 0 : "auto", background:copied?"#052e16":"#172554", color:copied?"#86efac":"#93c5fd",
+          border:"1px solid "+(copied?"#166534":"#1e40af"), borderRadius:6, padding:"5px 14px",
+          fontSize:12, fontFamily:"inherit", cursor:copyable.length?"pointer":"default", opacity:copyable.length?1:0.4
+        }}>{copied ? "Copied \u2713" : "Copy open serials ("+copyable.length+")"}</button>
+      </div>
+      <div style={{display:"flex", flexWrap:"wrap", gap:6, alignItems:"center"}}>
+        {chip("All types", !fType, function(){ setFType(""); })}
+        {Object.keys(DX_TYPES).map(function(k){ return chip(DX_TYPES[k].label, fType===k, function(){ setFType(fType===k?"":k); }, DX_TYPES[k]); })}
+      </div>
+      <div style={{display:"flex", flexWrap:"wrap", gap:6, alignItems:"center"}}>
+        {chip("Open", fState==="open", function(){ setFState(fState==="open"?"":"open"); }, DX_STATES.open)}
+        {chip("Chasing", fState==="chasing", function(){ setFState(fState==="chasing"?"":"chasing"); }, DX_STATES.chasing)}
+        {chip("Resolved", fState==="resolved", function(){ setFState(fState==="resolved"?"":"resolved"); }, DX_STATES.resolved)}
+        <select value={fPickup} onChange={function(e){ setFPickup(e.target.value); }} style={{
+          background:"#0b1222", color:"#cbd5e1", border:"1px solid #334155", borderRadius:6,
+          padding:"4px 8px", fontSize:12, fontFamily:"inherit"
+        }}>
+          <option value="">All pickups</option>
+          {pickupNames.map(function(p){ return <option key={p} value={p}>{p}</option>; })}
+        </select>
+        {!fState && (
+          <label style={{fontSize:12, color:"#64748b", display:"flex", alignItems:"center", gap:6, cursor:"pointer"}}>
+            <input type="checkbox" checked={showResolved} onChange={function(e){ setShowResolved(e.target.checked); }}/>
+            show resolved
+          </label>
+        )}
+      </div>
+      {list.length===0 && (
+        <div style={{textAlign:"center", padding:"48px 20px", color:"#64748b", border:"1px dashed #334155", borderRadius:10}}>
+          {(discrepancies||[]).length===0 ? (
+            <div>
+              <div style={{fontSize:14, marginBottom:8}}>No discrepancies tracked yet.</div>
+              {seedable && !readOnly && (
+                <div>
+                  <div style={{fontSize:12, marginBottom:14}}>Seed the tracker from the reconcile reports already stored on your pickups. Safe to run more than once &mdash; seeding is idempotent.</div>
+                  <button onClick={onSeed} className="resolve-btn" style={{background:"#1d4ed8", color:"#fff", border:"none", borderRadius:6, padding:"8px 18px", fontSize:13, fontFamily:"inherit", cursor:"pointer"}}>Seed from stored reports</button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{fontSize:13}}>Nothing matches the current filters.</div>
+          )}
+        </div>
+      )}
+      {list.map(function(d){
+        var T = DX_TYPES[d.type]||{ label:d.type, rank:9, stripe:"#64748b", bg:"#1e293b", text:"#94a3b8", border:"#334155" };
+        var S = DX_STATES[d.state]||DX_STATES.open;
+        var isOpen = expandedId===d.id;
+        var age = dxAgeDays(d);
+        return (
+          <div key={d.id} className="card-hover" style={{border:"1px solid #1e293b", borderLeft:"4px solid "+T.stripe, borderRadius:8, background:"#0b1222", overflow:"hidden"}}>
+            <div onClick={function(){ setExpandedId(isOpen?null:d.id); setResolvingId(null); setNoteDraft(""); }} style={{display:"flex", alignItems:"center", gap:10, padding:"10px 14px", cursor:"pointer", flexWrap:"wrap"}}>
+              <span className="pill" style={{background:T.bg, color:T.text, border:"1px solid "+T.border}}>{T.label}</span>
+              <span style={{fontFamily:"'Geist Mono',monospace", fontSize:14, fontWeight:600, color:"#e2e8f0"}}>{d.serial}</span>
+              {d.ticketNo ? <span style={{fontSize:11, color:"#93c5fd", background:"#172554", border:"1px solid #1e40af", borderRadius:999, padding:"1px 8px"}}>{d.ticketNo}</span> : null}
+              <span style={{fontSize:11, color:"#94a3b8", background:"#1e293b", border:"1px solid #334155", borderRadius:999, padding:"1px 8px"}}>{d.pickupName}</span>
+              <span style={{marginLeft:"auto", fontSize:11, color:"#64748b"}}>
+                {d.state==="resolved" ? ("resolved "+dxFmtDate(d.resolution&&d.resolution.at)) : (age===null ? "" : ("open "+age+(age===1?" day":" days")))}
+              </span>
+              <button className="pill resolve-btn" title={d.state==="resolved" ? "" : "Click to toggle Open / Chasing"} onClick={function(ev){ ev.stopPropagation(); cycleState(d); }} style={{
+                background:S.bg, color:S.text, border:"1px solid "+S.border, cursor:(readOnly||d.state==="resolved")?"default":"pointer", fontFamily:"inherit"
+              }}>{S.label}</button>
+            </div>
+            {isOpen && (
+              <div style={{borderTop:"1px solid #1e293b", padding:"12px 16px", display:"flex", flexDirection:"column", gap:12}}>
+                {evidenceBlock(d)}
+                {d.state==="resolved" && d.resolution && (
+                  <div style={{fontSize:12, color:"#86efac", background:"#052e16", border:"1px solid #166534", borderRadius:6, padding:"8px 12px"}}>
+                    Resolved &mdash; {DX_REASON_LABELS[d.resolution.reason]||d.resolution.reason}
+                    {d.resolution.note ? " \u00b7 "+d.resolution.note : ""}
+                    {" \u00b7 by "}{d.resolution.resolvedBy==="system" ? "system" : "operator"}
+                    {" \u00b7 "+dxFmtDate(d.resolution.at)}
+                  </div>
+                )}
+                <div style={{display:"flex", flexDirection:"column", gap:5}}>
+                  {(d.notes||[]).map(function(n,i){
+                    return (
+                      <div key={i} style={{fontSize:12, display:"flex", gap:8}}>
+                        <span style={{color:"#475569", whiteSpace:"nowrap"}}>{dxFmtDate(n.at)}</span>
+                        <span style={{color:n.by==="system"?"#f59e0b":"#38bdf8", whiteSpace:"nowrap"}}>{n.by==="system"?"system":n.by}</span>
+                        <span style={{color:"#cbd5e1"}}>{n.text}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {!readOnly && d.state!=="resolved" && (
+                  <div style={{display:"flex", gap:8}}>
+                    <input value={noteDraft} onChange={function(e){ setNoteDraft(e.target.value); }} placeholder="Add a note to the trail" style={{
+                      flex:1, background:"#0f172a", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"6px 10px", fontSize:12, fontFamily:"inherit"
+                    }}/>
+                    <button onClick={function(){ addNote(d); }} className="resolve-btn" style={{background:"#1e293b", color:"#93c5fd", border:"1px solid #334155", borderRadius:6, padding:"6px 14px", fontSize:12, fontFamily:"inherit", cursor:"pointer"}}>Add note</button>
+                  </div>
+                )}
+                {!readOnly && d.state!=="resolved" && resolvingId!==d.id && (
+                  <div>
+                    <button onClick={function(){ setResolvingId(d.id); setReasonCode(""); setResolveNote(""); }} className="resolve-btn" style={{background:"#052e16", color:"#86efac", border:"1px solid #166534", borderRadius:6, padding:"6px 16px", fontSize:12, fontFamily:"inherit", cursor:"pointer"}}>Resolve&hellip;</button>
+                  </div>
+                )}
+                {!readOnly && resolvingId===d.id && (
+                  <div style={{display:"flex", flexDirection:"column", gap:8, background:"#0f172a", border:"1px solid #334155", borderRadius:8, padding:"10px 12px"}}>
+                    <div style={{fontSize:12, color:"#94a3b8"}}>Resolution reason</div>
+                    <select value={reasonCode} onChange={function(e){ setReasonCode(e.target.value); }} style={{background:"#0b1222", color:"#e2e8f0", border:"1px solid #334155", borderRadius:6, padding:"6px 8px", fontSize:12, fontFamily:"inherit"}}>
+                      <option value="">Select a reason&hellip;</option>
+                      {DX_REASONS.map(function(r){ return <option key={r.code} value={r.code}>{r.label}</option>; })}
+                    </select>
+                    <input value={resolveNote} onChange={function(e){ setResolveNote(e.target.value); }} placeholder={reasonCode==="other" ? "Note (required for Other)" : "Note (optional)"} style={{
+                      background:"#0b1222", color:"#e2e8f0", border:"1px solid "+(reasonCode==="other"&&!resolveNote.trim()?"#7f1d1d":"#334155"), borderRadius:6, padding:"6px 10px", fontSize:12, fontFamily:"inherit"
+                    }}/>
+                    <div style={{display:"flex", gap:8}}>
+                      <button onClick={function(){ submitResolve(d); }} disabled={!reasonCode||(reasonCode==="other"&&!resolveNote.trim())} className="resolve-btn" style={{
+                        background:"#166534", color:"#fff", border:"none", borderRadius:6, padding:"6px 16px", fontSize:12, fontFamily:"inherit",
+                        cursor:(!reasonCode||(reasonCode==="other"&&!resolveNote.trim()))?"default":"pointer",
+                        opacity:(!reasonCode||(reasonCode==="other"&&!resolveNote.trim()))?0.4:1
+                      }}>Confirm resolve</button>
+                      <button onClick={function(){ setResolvingId(null); }} className="resolve-btn" style={{background:"transparent", color:"#64748b", border:"1px solid #334155", borderRadius:6, padding:"6px 14px", fontSize:12, fontFamily:"inherit", cursor:"pointer"}}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+                {!readOnly && d.state==="resolved" && (
+                  <div>
+                    <button onClick={function(){ reopen(d); }} className="resolve-btn" style={{background:"#1e293b", color:"#fdba74", border:"1px solid #7c2d12", borderRadius:6, padding:"6px 16px", fontSize:12, fontFamily:"inherit", cursor:"pointer"}}>Reopen</button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function AuditXRefTab({tickets, shipments, setTab, setOpenTicketId, setOpenShipmentId}){
   const [results,      setResults]      = useState(null);
