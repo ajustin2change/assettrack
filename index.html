@@ -1202,8 +1202,8 @@ function App(){
         {!showSettings && tab===0 && <TicketsTab tickets={tickets} setTickets={saveTickets} setVendorReport={setVendorReport} setTab={setTab} openTicketId={openTicketId} setOpenTicketId={setOpenTicketId} locations={locations} requestors={requestors} custodyEvents={custodyEvents} readOnly={!user} onDeleteTicket={removeTicket}/>}
         {!showSettings && tab===1 && <PickupScanTab tickets={tickets} setTickets={saveTickets} locations={locations} readOnly={!user} routeOrder={routeOrder} setRouteOrder={setRouteOrder}/>}
         {!showSettings && tab===2 && <ShipmentsTab tickets={tickets} setTickets={saveTickets} shipments={shipments} setShipments={saveShipments} setVendorReport={setVendorReport} readOnly={!user} openShipmentId={openShipmentId} setOpenShipmentId={setOpenShipmentId} custodyEvents={custodyEvents} appConfig={appConfig} saveAppConfig={saveAppConfig} onDeleteShipment={removeShipment}/>}
-        {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user}/>}
-        {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab} discrepancies={discrepancies} onTrackExtra={trackExtra} readOnly={!user}/>}
+        {!showSettings && tab===3 && <ReconcileTab tickets={tickets} shipments={shipments} setShipments={saveShipments} vendorReport={vendorReport} setVendorReport={setVendorReport} setTab={setTab} readOnly={!user} discrepancies={discrepancies} onTrackExtra={trackExtra}/>}
+        {!showSettings && tab===4 && <ReportTab report={vendorReport} tickets={tickets} shipments={shipments} setTab={setTab}/>}
         {!showSettings && tab===5 && <AuditXRefTab tickets={tickets} shipments={shipments} setTab={setTab} setOpenTicketId={setOpenTicketId} setOpenShipmentId={setOpenShipmentId}/>}
         {!showSettings && tab===6 && <DiscrepanciesTab discrepancies={discrepancies} onSave={updateDiscrepancy} userEmail={user&&user.email?user.email:""} readOnly={!user}/>}
       </div>
@@ -4590,7 +4590,7 @@ function VendorPickupForm({pickup, tickets, onSave, onCancel, readOnly}){
 // ══════════════════════════════════════════════════════════════════
 // TAB 4 — RECONCILE
 // ══════════════════════════════════════════════════════════════════
-function ReconcileTab({tickets, shipments, setShipments, vendorReport, setVendorReport, setTab, readOnly}){
+function ReconcileTab({tickets, shipments, setShipments, vendorReport, setVendorReport, setTab, readOnly, discrepancies, onTrackExtra}){
   const [selectedId, setSelectedId] = useState(null);
   const selected = shipments.find(function(x){ return x.id===selectedId; }) || null;
 
@@ -4604,6 +4604,8 @@ function ReconcileTab({tickets, shipments, setShipments, vendorReport, setVendor
       setTab={setTab}
       onBack={function(){ setSelectedId(null); }}
       readOnly={readOnly}
+      discrepancies={discrepancies}
+      onTrackExtra={onTrackExtra}
     />;
   }
 
@@ -4654,7 +4656,7 @@ function ReconcileTab({tickets, shipments, setShipments, vendorReport, setVendor
   );
 }
 
-function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorReport, setTab, onBack, readOnly}){
+function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorReport, setTab, onBack, readOnly, discrepancies, onTrackExtra}){
   const fileRef = useRef();
   const [vendorData, setVendorData]     = useState(null);
   const [vendorFileName, setVendorFileName] = useState(pickup.auditFileName||"");
@@ -5506,7 +5508,7 @@ function ReconcilePickup({pickup, tickets, shipments, setShipments, setVendorRep
 // ══════════════════════════════════════════════════════════════════
 // TAB 5 — REPORT
 // ══════════════════════════════════════════════════════════════════
-function ReportTab({report, tickets, shipments, setTab, discrepancies, onTrackExtra, readOnly}){
+function ReportTab({report, tickets, shipments, setTab}){
   var today = new Date();
   var allDates = tickets.map(function(t){ return t.date; }).filter(Boolean).sort();
   var defaultFrom = allDates.length ? allDates[0] : new Date(today.getFullYear(), today.getMonth()-5, 1).toISOString().slice(0,10);
