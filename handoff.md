@@ -4,9 +4,9 @@
 
 > **This block is the session contract.** It is REPLACED in place at the end of every session (after confirmed live smoke). Everything below it is append-only archive — consult a session block only when a build touches its territory. If this block ever conflicts with archive text, this block wins; if it conflicts with the live bytes, THE BYTES WIN (this doc has been wrong before — verify, don't trust).
 
-**Deployed build:** `index.html` at `raw.githubusercontent.com/ajustin2change/AssetTrack/main/index.html` = **415,463 bytes, md5 `1c4caa6868846914c373b942bb3f3feb`** (Builds 1b + 1c, two-exits session).
+**Deployed build:** `index.html` at `raw.githubusercontent.com/ajustin2change/AssetTrack/main/index.html` = **419,422 bytes, md5 `18f0ebeff2ae18a086b8df17fc50a458`** (Build 2, rescan session).
 
-**Gates (self-extracting, in repo):** `matcher_tests.js` 17 · `detector_smoke.js` 16 · `reconcile_tests.js` 46 · `pickup_tests.js` 27 · `mount_smoke.js` (AST undefined-name scan). Compile-verify = Babel 7.24.4, presets `["env","react"]`.
+**Gates (self-extracting, in repo):** `matcher_tests.js` 17 · `detector_smoke.js` 16 · `reconcile_tests.js` 46 · `pickup_tests.js` 36 · `mount_smoke.js` (AST undefined-name scan). Compile-verify = Babel 7.24.4, presets `["env","react"]`.
 
 **Session protocol (streamlined — adopted end of two-exits session):**
 1. Read this STATE block. Do NOT re-read the full handoff.
@@ -18,7 +18,7 @@
 
 **Hard constraints (unchanged, permanent):** single-file HTML · no multiline JSX string literals · no regex with literal newlines · all Firestore I/O through the `repo` seam · `custodyEvents` append-only, never in session state/`hydrateAll`/`pushToFirestore` · comments = one line of why · serial inputs say "Serial numbers", direction text succinct · one clarifying question at a time · vendor audit workbooks single-sheet · gate cases land before the button they pin · customer-facing artifacts never show internal resolution mechanics.
 
-**Next builds (settled designs — do not reopen):** **Build 2** — Rescan on correction AND extra rows (banner "Rescanning — ticket expects X"; manual scan/type ONLY, no use-ticket-serial shortcut; in-place recompute preserves sibling decisions). **Build 3** — live matcher helper: scan-page truth counter, amber "likely match" rows, no-match thunk (WebAudio, true no-match only, mute toggle). **Then: ticket 660123 data repair** (Rescan Ticket → re-enter → decide → re-send; the 1c rescan restore enables this).
+**Next builds (settled designs — do not reopen):** **Build 3** — live matcher helper: scan-page truth counter, amber "likely match" rows, no-match thunk (WebAudio, true no-match only, mute toggle). **Then: ticket 660123 data repair** (Rescan Ticket → re-enter → decide → re-send; the 1c rescan restore + Build 2's row-level Rescan together enable this).
 
 **Open work (non-build-order):** `ticketNo` snapshot in custody events (+optional `ticket-deleted` type; detector gate) · housekeeping delete of dead `generateApprovalSheet` · multi-vendor audit import (CDR, Marrs) · backend tier → TDX → SSO · SharePoint `fileUrl` population · Data Governance access · Vantage Point audit backfill (~49, process only) · Firestore `serverTimestamp()`/immutability decision (may defer to SQL migration).
 
@@ -160,6 +160,18 @@ This is the working handoff for the AssetTrack ecosystem: a set of web applicati
 
 - **Prior-exposure disclosure.** Serials, locations, and requestor PII were publicly readable for some period before the rules fix. Whoever owns OU data governance should be told proactively — a "what was exposed / what changed" summary can be drafted on request.
 - **Ownership concentration.** The whole production stack (GitHub Pages, the Firebase project, auth keyed to a personal Gmail) is owned by one person. If they're unavailable, OU has an ITAD system of record nobody else can administer or recover. This is the real driver behind the TDX/backend/SSO migration — name it to leadership as an institutional risk.
+
+---
+
+**Completed in the rescan session (BUILD 2 — deployed and smoke-tested live):**
+
+- ✅ **Row-level Rescan on correction AND extra rows** — the third verb of the Accept/Rescan/Reject model, Compare page (`PickupScanForm`) ONLY. The remote awaiting-approval panel deliberately gets NO Rescan: the verb means "I have the device in hand."
+- ✅ **`applyRescan` — pure top-level helper inside the pickup-resolution-core slice** (extracted by `pickup_tests.js`): normalizes input, refuses dup against another existing capture (re-entering the removed serial itself is NOT a dup), replaces the one bad capture, and clears the TARGET row's own resolution + link pair — the old decision belonged to the old capture, and `exp:<idx>` survives the recompute, so without the explicit clear a stale decision would attach to fresh data. Extras clean up for free (`ext:<oldSerial>` stops existing). Sibling decisions/links survive via the EXISTING in-place pruning — no new preservation code.
+- ✅ **Arming mutates nothing — commit is atomic.** Cancel is a true no-op; an armed-then-abandoned rescan can never leave a deleted capture that falsely flips a row to Missing. Any recompute (fresh Compare, waive-from-results) and `removeScan` disarm an in-flight rescan. A rescan landing on a previously-"Kept" missing serial flips that row to matched and the existing pruning drops the stale kept — by construction, verified in live smoke.
+- ✅ **`runComparison` gains a `scannedOverride` second param** mirroring the `waivedOverride` stale-closure guard: the commit handler computes the next scan list synchronously and passes it in; the waived Set still drives the `inPlace` path.
+- ✅ **Banner (settled copy):** corrections — "⟲ Rescanning — ticket expects `<expectedSerial>`"; extras — "⟲ Rescanning — replacing `<capture>`" (extras wording settled this session: extras have no expected serial, so the banner names the capture being replaced). Enter/Add route to commit while armed; multi-paste refused while armed (a rescan replaces exactly ONE capture); flash gains literal-`msg` support.
+- ✅ **Gate first:** `pickup_tests.js` **27 → 36** — replacement/prepend, normalization, dup refusal, removed-serial-not-a-dup, empty/no-target refusal, target-cleared-siblings-survive (resolutions AND link pairs), extra-row path, purity (inputs never mutated). Cases landed before the buttons, per the gate-discipline rule.
+- **Delivery artifacts:** `apply_build2.py` (14 hunks from the 415,463-byte base) + updated `pickup_tests.js` committed alongside. All five gates + compile-verify green on the edited bytes. **Deployed: 419,422 bytes, md5 18f0ebeff2ae18a086b8df17fc50a458.**
 
 ---
 
