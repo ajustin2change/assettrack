@@ -141,5 +141,44 @@ T("pickupScanned transition still emits pickup-scanned only (no spurious approva
   if(types.filter(t=>t==="pickup-scanned").length!==1) throw new Error("pickup-scanned count wrong: "+types);
   if(types.indexOf("approval-captured")>=0) throw new Error("spurious approval-captured");
 });
+// ── Build 1c: remote validation (approval-validated) ──
+T("Mark Validated transition emits approval-validated with requestor attester and filename note", ()=>{
+  events.length=0;
+  requestorsRef.current = [{name:"Javiert Gray", email:"javiert.gray@ouhsc.edu"}];
+  const a = {...tBase, requestor:"Javiert Gray", approvalStatus:"awaiting-approval", approvalFile:"ApprovalRequest-664883.pdf"};
+  const b = {...a, approvalStatus:"validated", validatedAt:"7/22/2026, 4:12:02 PM"};
+  detectTicketCustody([a],[b]);
+  requestorsRef.current = [];
+  if(events.length!==1) throw new Error("expected 1, got "+events.map(e=>e.type));
+  const e=last();
+  if(e.type!=="approval-validated") throw new Error("type "+e.type);
+  if(!e.attester || e.attester.name!=="Javiert Gray") throw new Error("attester "+JSON.stringify(e.attester));
+  if(e.attester.email!=="javiert.gray@ouhsc.edu") throw new Error("requestor email not snapshotted: "+e.attester.email);
+  if(e.note.indexOf("ApprovalRequest-664883.pdf")<0) throw new Error("filename missing from note: "+e.note);
+});
+T("Exit A save (signature + validated together) emits approval-captured only", ()=>{
+  events.length=0;
+  const a = {...tBase, requestor:"Jane Doe"};
+  const b = {...a, approvalStatus:"validated", approvalSignature:{dataUrl:"data:image/png;base64,x", printedName:"Jane Doe", signedAt:"now"}};
+  detectTicketCustody([a],[b]);
+  const types = events.map(e=>e.type);
+  if(types.length!==1 || types[0]!=="approval-captured") throw new Error("expected [approval-captured], got "+types);
+});
+T("direct vendor pickup validation emits no approval-validated", ()=>{
+  events.length=0;
+  const a = {...tBase, pickupScanned:false, directVendorPickup:true, requestor:"Jane Doe"};
+  const b = {...a, pickupScanned:true, approvalStatus:"validated"};
+  detectTicketCustody([a],[b]);
+  const types = events.map(e=>e.type);
+  if(types.indexOf("approval-validated")>=0) throw new Error("spurious approval-validated on direct pickup: "+types);
+  if(types.filter(t=>t==="pickup-attested").length!==1) throw new Error("pickup-attested missing: "+types);
+});
+T("resave of a validated ticket emits nothing", ()=>{
+  events.length=0;
+  const a = {...tBase, approvalStatus:"validated", validatedAt:"now"};
+  const b = {...a};
+  detectTicketCustody([a],[b]);
+  if(events.length!==0) throw new Error("expected 0, got "+events.map(e=>e.type));
+});
 console.log(pass+" passed, "+fail+" failed");
 process.exit(fail?1:0);

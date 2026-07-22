@@ -772,9 +772,9 @@ function App(){
   // subscribe, hydrateAll, legacy session load, pushToFirestore) bypass the
   // wrappers on purpose and therefore never emit. No backfill: log starts at
   // go-live. WARNING: if the meaning of pickupScanned, directVendorPickup,
-  // shipment.status, ticketIds, arrivedDate, codd or approvalSignature ever
-  // changes, revisit the detectors below -- event semantics ride on those
-  // transitions.
+  // shipment.status, ticketIds, arrivedDate, codd, approvalSignature or
+  // approvalStatus ever changes, revisit the detectors below -- event
+  // semantics ride on those transitions.
   function emitCustody(type, fields){
     if(!userRef.current) return;
     var ev = Object.assign({
@@ -829,6 +829,16 @@ function App(){
         emitCustody("approval-captured", { ticketIds:[t.id], serials: custodySerials(t),
           attester: {name:sName, email:(sMatch && sMatch.email)||""},
           note: "In-person approval signed by "+(sName||"?") });
+      }
+      // Remote validation (Build 1c): approvalStatus reaching "validated"
+      // without a signature = Mark Validated on a returned form. Signature
+      // saves and attested direct pickups are covered above, so both are
+      // excluded here to keep one event per approval.
+      var wasVal = old ? old.approvalStatus==="validated" : false;
+      if(!wasVal && t.approvalStatus==="validated" && !t.approvalSignature && !t.directVendorPickup){
+        emitCustody("approval-validated", { ticketIds:[t.id], serials: custodySerials(t),
+          attester: attesterFor(t),
+          note: "Approval validated from returned form"+(t.approvalFile?" ("+t.approvalFile+")":"") });
       }
     });
   }
@@ -1737,6 +1747,7 @@ var CUSTODY_META = {
   "pickup-scanned":          {icon:"📷", label:"Pickup Scanned",             color:"#93c5fd", border:"#1e40af"},
   "pickup-attested":         {icon:"🖊", label:"Pickup Attested",            color:"#93c5fd", border:"#1e40af"},
   "approval-captured":       {icon:"🖊", label:"In-Person Approval",         color:"#86efac", border:"#166534"},
+  "approval-validated":      {icon:"✅", label:"Approval Validated",         color:"#86efac", border:"#166534"},
   "grouped-into-shipment":   {icon:"📦", label:"Grouped into Vendor Pickup", color:"#94a3b8", border:"#334155"},
   "ungrouped-from-shipment": {icon:"📤", label:"Removed from Vendor Pickup", color:"#94a3b8", border:"#334155"},
   "vendor-handoff":          {icon:"🚛", label:"Vendor Handoff",             color:"#fbbf24", border:"#a16207"},
@@ -2135,8 +2146,10 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
   }
 
   function doRescan(t){
-    // Reset scan state, keep expected assets, send to pickup scan tab
-    saveTicket({...t, pickupScanned:false, pickupResult:null, assets:[], approvalStatus:undefined, approvalFile:undefined, approvalUploadedAt:undefined, approvalSignature:undefined, validatedAt:undefined});
+    // Reset scan state and restore the ORIGINAL submitted list (validation
+    // syncs expectedAssets to the approved outcome; originalAssets is the
+    // frozen submission), then send to pickup scan tab.
+    saveTicket({...t, expectedAssets: t.originalAssets || t.expectedAssets, pickupScanned:false, pickupResult:null, assets:[], approvalStatus:undefined, approvalFile:undefined, approvalUploadedAt:undefined, approvalSignature:undefined, validatedAt:undefined});
     setTab(1); // Pickup Scan tab
   }
   if(view==="new"||view==="edit") return <TicketForm ticket={active} tickets={tickets} locations={locations} requestors={requestors} onSave={saveTicket} onCancel={function(){ setView("list"); }} onDelete={function(id){ deleteTicket(id); setView("list"); }} onRescan={doRescan} isNew={view==="new"} custodyEvents={custodyEvents} readOnly={readOnly}/>;
@@ -2445,6 +2458,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
   function regenApprovalPdf(){
     if(!pr) return;
     var sigRec = form.approvalSignature||null;
+    var isRecord = !!sigRec || form.approvalStatus==="validated"; // decisions print once validated
     var jspdf = window.jspdf || window.jsPDF;
     if(!jspdf){ alert("PDF library not loaded."); return; }
     // Reconstruct resolved from pickupResult
@@ -2460,7 +2474,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
     var margin = 36;
     doc.setFillColor(15,23,42); doc.rect(0,0,pageW,60,"F");
     doc.setFont("helvetica","bold"); doc.setFontSize(16); doc.setTextColor(241,245,249);
-    doc.text(sigRec ? "IT Asset Disposal — Approval Record (Signed)" : "IT Asset Disposal — Approval Required", margin, 24);
+    doc.text(sigRec ? "IT Asset Disposal — Approval Record (Signed)" : isRecord ? "IT Asset Disposal — Approval Record" : "IT Asset Disposal — Approval Required", margin, 24);
     doc.setFont("helvetica","normal"); doc.setFontSize(9); doc.setTextColor(148,163,184);
     doc.text("Ticket: "+form.ticketNo+"   |   Requestor: "+(form.requestor||"—")+"   |   Site: "+(form.site||"—"), margin, 42);
     var legendItems = [
@@ -2479,22 +2493,22 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
     var bodyRows = []; var rowStyles = {};
     var idx = 0;
     resolved.missing.forEach(function(m){
-      bodyRows.push(["Missing", m.serial||"", "", m.manufacturer||"", m.machineType||"", m.ouInventory||"", sigRec?"APPROVED":""]);
+      bodyRows.push(["Missing", m.serial||"", "", m.manufacturer||"", m.machineType||"", m.ouInventory||"", isRecord?"APPROVED":""]);
       rowStyles[idx++] = {fillColor:[254,226,226]};
     });
     // Extras from pickupResult buckets — same source as the send-time PDF (Build 1a)
     (resolved.extra||[]).forEach(function(e){
-      bodyRows.push(["Extra", "", e.serial||"", "", "", "", sigRec?(e.resolution==="remove"?"DENIED":"APPROVED"):""]);
+      bodyRows.push(["Extra", "", e.serial||"", "", "", "", isRecord?(e.resolution==="remove"?"DENIED":"APPROVED"):""]);
       rowStyles[idx++] = {fillColor:[219,234,254]};
     });
     actionableCorrections(resolved.partial).forEach(function(p){
-      bodyRows.push(["Proposed Correction", p.expectedSerial||"", (p.canonical||p.scannedSerial||"")+((p.scannedSerial&&p.canonical&&p.scannedSerial!==p.canonical)?"\n(captured: "+p.scannedSerial+")":""), p.manufacturer||"", p.machineType||"", p.ouInventory||"", sigRec?"APPROVED":""]);
+      bodyRows.push(["Proposed Correction", p.expectedSerial||"", (p.canonical||p.scannedSerial||"")+((p.scannedSerial&&p.canonical&&p.scannedSerial!==p.canonical)?"\n(captured: "+p.scannedSerial+")":""), p.manufacturer||"", p.machineType||"", p.ouInventory||"", isRecord?"APPROVED":""]);
       rowStyles[idx++] = {fillColor:[254,252,202]};
     });
     // Linked pairs
     (pr.missing||[]).filter(function(m){ return m.linkedTo; }).forEach(function(m){
       var ex = (pr.extra||[]).find(function(e){ return e.id===m.linkedTo; });
-      bodyRows.push(["Proposed Correction", m.serial||"", ex?ex.serial:"", m.manufacturer||"", m.machineType||"", m.ouInventory||"", sigRec?"APPROVED":""]);
+      bodyRows.push(["Proposed Correction", m.serial||"", ex?ex.serial:"", m.manufacturer||"", m.machineType||"", m.ouInventory||"", isRecord?"APPROVED":""]);
       rowStyles[idx++] = {fillColor:[254,252,202]};
     });
     doc.autoTable({
