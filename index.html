@@ -313,6 +313,19 @@ function restateForApproval(resolved){
     extra:(resolved.extra||[]).map(function(e){ return e.linkedTo ? e : {...e, resolution:null}; })
   };
 }
+// Rescan (Build 2): replace ONE bad capture with a manually re-entered serial.
+// Target's own decision/links are cleared (they belonged to the old capture);
+// siblings untouched. Pure and extracted by pickup_tests.js.
+function applyRescan(scanned, resolutions, links, target, raw){
+  var serial = String(raw||"").trim().toUpperCase();
+  if(!serial || !target) return {ok:false, reason:"empty"};
+  if(serial!==target.removedSerial && scanned.indexOf(serial)!==-1) return {ok:false, reason:"dup", serial:serial};
+  var nextScanned = [serial].concat(scanned.filter(function(s){ return s!==target.removedSerial; }));
+  var nextRes = {}; Object.keys(resolutions||{}).forEach(function(k){ if(k!==target.rowId) nextRes[k]=resolutions[k]; });
+  var partner = (links||{})[target.rowId];
+  var nextLinks = {}; Object.keys(links||{}).forEach(function(k){ if(k!==target.rowId && k!==partner) nextLinks[k]=links[k]; });
+  return {ok:true, serial:serial, scanned:nextScanned, resolutions:nextRes, links:nextLinks};
+}
 // ── End pickup resolution core ──
 
 // ── Correction-row visualization (Phase 2b) ──
@@ -3359,6 +3372,7 @@ function PickupScanForm({ticket, onSave, onBack}){
   const [sigName, setSigName]       = useState("");
   const [linkingId, setLinkingId]   = useState(null); // missing item id currently being linked
   const [links, setLinks]           = useState({});    // {missingId: extraId, extraId: missingId}
+  const [rescan, setRescan]         = useState(null);  // armed rescan target {rowId,kind,removedSerial,expectedSerial}
   const inputRef = useRef();
   useEffect(function(){ if(inputRef.current && !directPickup) inputRef.current.focus(); }, []);
 
@@ -3470,6 +3484,7 @@ function PickupScanForm({ticket, onSave, onBack}){
     var last = current.trim().toUpperCase();
     if(last) parts.push(last);
     if(parts.length <= 1) return; // single value — let the input handle it normally
+    if(rescan){ e.preventDefault(); setFlash({msg:"\u26a0 One serial at a time while rescanning", dup:true}); setTimeout(function(){ setFlash(null); },1800); setInput(""); return; }
     e.preventDefault();
     var added = addMultiple(parts);
     setFlash({serial: added + " serial" + (added!==1?"s":"") + " added from paste", dup:false, multi:true});
@@ -3477,17 +3492,34 @@ function PickupScanForm({ticket, onSave, onBack}){
     setInput("");
   }
 
-    function removeScan(s){ setScanned(function(prev){ return prev.filter(function(x){ return x!==s; }); }); setResult(null); }
+    function removeScan(s){ setScanned(function(prev){ return prev.filter(function(x){ return x!==s; }); }); setResult(null); setRescan(null); }
 
-  function runComparison(waivedOverride){
+  // Rescan (Build 2): arming mutates nothing until commit — Cancel is a true no-op.
+  function armRescan(rowId, kind, removedSerial, expectedSerial){
+    setRescan({rowId:rowId, kind:kind, removedSerial:removedSerial, expectedSerial:expectedSerial||null});
+    if(inputRef.current) inputRef.current.focus();
+  }
+  function commitRescan(raw){
+    var r = applyRescan(scanned, resolutions, links, rescan, raw);
+    if(!r.ok){
+      if(r.reason==="dup"){ setFlash({serial:r.serial, dup:true}); setTimeout(function(){ setFlash(null); },1400); }
+      setInput(""); return;
+    }
+    setScanned(r.scanned); setResolutions(r.resolutions); setLinks(r.links); setInput("");
+    runComparison(new Set(waived), r.scanned); // in-place: sibling decisions survive
+    setFlash({msg:"\u2713 Rescanned: "+r.serial, dup:false}); setTimeout(function(){ setFlash(null); },1400);
+  }
+
+  function runComparison(waivedOverride, scannedOverride){
     // Only honor the override if it is really a Set: as a bare onClick handler,
     // React passes the CLICK EVENT as the first arg (truthy non-Set) — must
     // fall back to state. A Set also signals an IN-PLACE recompute (waive from
     // results): preserve links/resolutions instead of resetting them.
     const inPlace   = waivedOverride instanceof Set;
     const w         = inPlace ? waivedOverride : waived;
+    const scanList  = scannedOverride || scanned; // rescan passes the next list synchronously (stale-closure guard)
     const expSet    = new Set(expected.map(function(a){ return a.serial; }));
-    const scannedSet= new Set(scanned);
+    const scannedSet= new Set(scanList);
     const matched=[], missing=[], extra=[], partial=[];
     const consumed = new Set();
 
@@ -3513,11 +3545,12 @@ function PickupScanForm({ticket, onSave, onBack}){
     });
 
     const partialScanned = new Set(partial.map(function(p){ return p.scannedSerial; }));
-    scanned.forEach(function(serial){
+    scanList.forEach(function(serial){
       if(!expSet.has(serial) && !partialScanned.has(serial)) extra.push({id:"ext:"+serial, serial, type:"extra", resolution:null});
     });
 
     setResult({matched, missing, extra, partial, waived:Array.from(w), scannedAt:new Date().toLocaleString()});
+    setRescan(null); // any recompute disarms an in-flight rescan
     if(inPlace){
       // Prune links to pairs whose BOTH ids still exist as missing/extra;
       // waiving a linked item drops its pair. Keep resolutions for surviving ids.
@@ -3877,17 +3910,23 @@ function PickupScanForm({ticket, onSave, onBack}){
       {(
       <div style={{background:"#1e293b",borderRadius:12,border:"1px solid #334155",padding:"18px 22px",marginBottom:16}}>
         <div style={{fontSize:11,color:"#64748b",textTransform:"uppercase",letterSpacing:0.8,marginBottom:10}}>Scan Assets</div>
+        {rescan && (
+          <div style={{padding:"9px 14px",borderRadius:8,background:"#1e3a5f",border:"1px solid #3b82f6",color:"#93c5fd",fontSize:13,marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span>{"\u27f2 Rescanning \u2014 "}{rescan.expectedSerial ? "ticket expects " : "replacing "}<strong style={{fontFamily:"'Geist Mono',monospace",letterSpacing:1,marginLeft:4}}>{rescan.expectedSerial || rescan.removedSerial}</strong></span>
+            <button onClick={function(){ setRescan(null); }} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:14,fontFamily:"inherit"}}>{"\u2715 Cancel"}</button>
+          </div>
+        )}
         <div style={{display:"flex",gap:10,marginBottom:10}}>
           <input ref={inputRef} value={input} onChange={function(e){ setInput(e.target.value); }}
-            onKeyDown={function(e){ if(e.key==="Enter") addScan(input); }}
+            onKeyDown={function(e){ if(e.key==="Enter"){ if(rescan) commitRescan(input); else addScan(input); } }}
             onPaste={handlePaste}
             onFocus={function(){ setFocus(true); }} onBlur={function(){ setFocus(false); }}
             placeholder="Serial numbers"
             style={{flex:1,background:"#0f172a",border:`2px solid ${focus?"#3b82f6":"#334155"}`,borderRadius:8,color:"#f1f5f9",padding:"11px 14px",fontSize:14,fontFamily:"inherit",letterSpacing:1,transition:"border-color 0.2s"}}/>
-          <button onClick={function(){ addScan(input); }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"11px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Add</button>
+          <button onClick={function(){ if(rescan) commitRescan(input); else addScan(input); }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"11px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Add</button>
         </div>
         {flash && <div style={{padding:"7px 12px",borderRadius:6,fontSize:13,background:flash.dup?"#450a0a":"#052e16",color:flash.dup?"#fca5a5":"#86efac",border:`1px solid ${flash.dup?"#7f1d1d":"#166534"}`}}>
-          {flash.multi ? `✓ ${flash.serial}` : flash.dup ? `⚠ Already scanned: ${flash.serial}` : `✓ Scanned: ${flash.serial}`}
+          {flash.msg ? flash.msg : flash.multi ? `✓ ${flash.serial}` : flash.dup ? `⚠ Already scanned: ${flash.serial}` : `✓ Scanned: ${flash.serial}`}
         </div>}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:12}}>
           <span style={{fontSize:12,color:"#64748b"}}>{scanned.length} scanned · {expected.length} expected</span>
@@ -4040,6 +4079,7 @@ function PickupScanForm({ticket, onSave, onBack}){
                       <div style={{display:"flex",gap:6}}>
                         <button onClick={function(){ setRes(item.id,"accept"); }} style={{background:accepted?"#10b981":"#0f172a",color:accepted?"#04120b":"#86efac",border:"1px solid #10b981",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>{accepted?"\u2713 Accepted":"Accept"}</button>
                         <button onClick={function(){ setRes(item.id,"reject"); }} style={{background:rejected?"#7f1d1d":"#0f172a",color:rejected?"#fecaca":"#fca5a5",border:"1px solid #7f1d1d",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>{rejected?"\u2715 Rejected":"Reject"}</button>
+                        <button onClick={function(){ armRescan(item.id,"partial",item.scannedSerial,item.expectedSerial); }} title="My capture was wrong - rescan the device" style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1d4ed8",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500,whiteSpace:"nowrap"}}>{"\u27f2 Rescan"}</button>
                       </div>
                     </div>
                   </div>
@@ -4131,6 +4171,7 @@ function PickupScanForm({ticket, onSave, onBack}){
                         <div style={{display:"flex",gap:6}}>
                           <button onClick={function(){ setRes(item.id,"include"); }} title="Add to the record" style={{background:"#0f172a",color:"#86efac",border:"1px solid #10b981",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>Include</button>
                           <button onClick={function(){ setRes(item.id,"remove"); }} title="Do not record" style={{background:"#0f172a",color:"#fca5a5",border:"1px solid #7f1d1d",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>Remove</button>
+                          <button onClick={function(){ armRescan(item.id,"extra",item.serial,null); }} title="My capture was wrong - rescan the device" style={{background:"#0f172a",color:"#93c5fd",border:"1px solid #1d4ed8",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>{"\u27f2 Rescan"}</button>
                         </div>
                       )}
                     </div>

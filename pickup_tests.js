@@ -33,7 +33,7 @@ const coreSrc = slice(
   "// \u2500\u2500 Correction-row visualization (Phase 2b) \u2500\u2500",
   "pickup resolution core");
 const core = new Function(coreSrc +
-  "\nreturn {isNoopCorrection:isNoopCorrection, actionableCorrections:actionableCorrections, finalizePickup:finalizePickup, undecidedCounts:undecidedCounts, restateForApproval:restateForApproval};")();
+  "\nreturn {isNoopCorrection:isNoopCorrection, actionableCorrections:actionableCorrections, finalizePickup:finalizePickup, undecidedCounts:undecidedCounts, restateForApproval:restateForApproval, applyRescan:applyRescan};")();
 
 // Harness ---------------------------------------------------------------------
 let pass = 0, fail = 0;
@@ -243,6 +243,59 @@ t("all-decided finalize leaves no pending sources (signed-record invariant)", fu
     extra:[{id:"ext:A", serial:"A1234567", resolution:"include"}, {id:"ext:B", serial:"B1234567", resolution:"remove"}]
   }), EXPMAP);
   assert(!out.assets.some(function(x){ return x.source==="scan-extra-pending"; }), "pending source on a signed record");
+});
+
+console.log("applyRescan \u2014 Build 2 (replace one capture; target decision cleared; siblings survive)");
+const RTGT = {rowId:"exp:0", kind:"partial", removedSerial:"F9FV58ANGHKJ", expectedSerial:"F9FV5BANGHKJ"};
+t("replacement: bad capture removed, new serial prepended", function(){
+  const r = core.applyRescan(["ABC1","F9FV58ANGHKJ","XYZ9"], {}, {}, RTGT, "F9FV5BANGHKJ");
+  eq(r.ok, true, "ok");
+  eq(r.scanned.join(","), "F9FV5BANGHKJ,ABC1,XYZ9", "old out, new first");
+});
+t("input normalized: trimmed and uppercased", function(){
+  const r = core.applyRescan(["F9FV58ANGHKJ"], {}, {}, RTGT, "  f9fv5banghkj ");
+  eq(r.ok, true, "ok");
+  eq(r.serial, "F9FV5BANGHKJ", "normalized");
+});
+t("dup against ANOTHER existing capture refused", function(){
+  const r = core.applyRescan(["ABC1","F9FV58ANGHKJ"], {}, {}, RTGT, "abc1");
+  eq(r.ok, false, "refused");
+  eq(r.reason, "dup", "reason");
+});
+t("re-entering the removed serial itself is NOT a dup", function(){
+  const r = core.applyRescan(["F9FV58ANGHKJ"], {}, {}, RTGT, "F9FV58ANGHKJ");
+  eq(r.ok, true, "allowed");
+  eq(r.scanned.join(","), "F9FV58ANGHKJ", "list unchanged");
+});
+t("empty input refused; missing target refused", function(){
+  eq(core.applyRescan(["A"], {}, {}, RTGT, "   ").ok, false, "empty");
+  eq(core.applyRescan(["A"], {}, {}, null, "B").ok, false, "no target");
+});
+t("target's own resolution cleared; sibling decisions survive", function(){
+  const r = core.applyRescan(["F9FV58ANGHKJ"], {"exp:0":"reject","exp:1":"accept","ext:Q":"remove"}, {}, RTGT, "NEW1");
+  eq(r.resolutions["exp:0"], undefined, "target cleared \u2014 old decision belonged to the old capture");
+  eq(r.resolutions["exp:1"], "accept", "sibling correction survives");
+  eq(r.resolutions["ext:Q"], "remove", "sibling extra survives");
+});
+t("target's link AND its partner dropped; sibling links survive", function(){
+  const links = {"exp:0":"ext:BAD","ext:BAD":"exp:0","exp:2":"ext:OK","ext:OK":"exp:2"};
+  const r = core.applyRescan(["F9FV58ANGHKJ"], {}, links, RTGT, "NEW1");
+  eq(r.links["exp:0"], undefined, "target side dropped");
+  eq(r.links["ext:BAD"], undefined, "partner side dropped");
+  eq(r.links["exp:2"], "ext:OK", "sibling pair survives");
+});
+t("extra-row target: serial-keyed capture replaced, its stale decision cleared", function(){
+  const xt = {rowId:"ext:BADCAP", kind:"extra", removedSerial:"BADCAP", expectedSerial:null};
+  const r = core.applyRescan(["BADCAP","OTHER"], {"ext:BADCAP":"include"}, {}, xt, "GOODCAP");
+  eq(r.scanned.join(","), "GOODCAP,OTHER", "replaced");
+  eq(r.resolutions["ext:BADCAP"], undefined, "stale include cleared");
+});
+t("purity: inputs not mutated", function(){
+  const s=["F9FV58ANGHKJ","K1"], res={"exp:0":"accept"}, ln={"exp:0":"ext:Z","ext:Z":"exp:0"};
+  core.applyRescan(s, res, ln, RTGT, "NEW2");
+  eq(s.join(","), "F9FV58ANGHKJ,K1", "scanned untouched");
+  eq(res["exp:0"], "accept", "resolutions untouched");
+  eq(ln["ext:Z"], "exp:0", "links untouched");
 });
 
 console.log("");
