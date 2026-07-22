@@ -272,7 +272,7 @@ function finalizePickup(resolved, expMap){
   var now = new Date().toLocaleString();
   function infoFor(serial){ var a=expMap[serial]||{}; return {manufacturer:a.manufacturer||"",machineType:a.machineType||"",ouInventory:a.ouInventory||""}; }
   var assets = [];
-  var missing = (resolved.missing||[]).slice();
+  var missing = (resolved.missing||[]).map(function(m){ return m.resolution==="kept" ? {...m, approvedMissing:true} : m; });
   var rejectedCaptures = [];
   (resolved.matched||[]).forEach(function(m){ assets.push({serial:m.serial, ...infoFor(m.serial), addedAt:now, source:"scan"}); });
   (resolved.partial||[]).forEach(function(p){
@@ -287,10 +287,31 @@ function finalizePickup(resolved, expMap){
     if(e.linkedTo) assets.push({serial:e.serial, ...infoFor(e.linkedTo), addedAt:now, source:"scan-linked"});
   });
   (resolved.extra||[]).forEach(function(e){
-    if(!e.linkedTo) assets.push({serial:e.serial, manufacturer:"", machineType:"", ouInventory:"", addedAt:now, source:"scan-extra-pending", approved:null});
+    if(e.linkedTo) return;
+    if(e.resolution==="remove") return; // decided out — capture stays in pickupScanList only
+    if(e.resolution==="include"){ assets.push({serial:e.serial, manufacturer:"", machineType:"", ouInventory:"", addedAt:now, source:"scan-extra", approved:true}); return; }
+    assets.push({serial:e.serial, manufacturer:"", machineType:"", ouInventory:"", addedAt:now, source:"scan-extra-pending", approved:null});
   });
   var partial = (resolved.partial||[]).filter(function(p){ return p.resolution!=="reject"; });
   return {assets:assets, missing:missing, partial:partial, rejectedCaptures:rejectedCaptures};
+}
+// Exit gate (Build 1b): undecided discrepancies on a resolved result.
+// Linked pairs are decided by the link; a kept missing or an
+// included/removed extra is decided; anything else is open.
+function undecidedCounts(resolved){
+  var p = (resolved.partial||[]).filter(function(x){ return x.resolution!=="accept" && x.resolution!=="reject"; }).length;
+  var m = (resolved.missing||[]).filter(function(x){ return !x.linkedTo && x.resolution!=="kept" && !x.approvedMissing; }).length;
+  var e = (resolved.extra||[]).filter(function(x){ return !x.linkedTo && x.resolution!=="include" && x.resolution!=="remove"; }).length;
+  return {partials:p, missing:m, extras:e, total:p+m+e};
+}
+// Exit B (Build 1b): in-person clicks cleared; every discrepancy restates
+// fresh. Machine pre-acceptance (defaultResolution on exacts) and links survive.
+function restateForApproval(resolved){
+  return {...resolved,
+    partial:(resolved.partial||[]).map(function(p){ return {...p, resolution:p.defaultResolution||null}; }),
+    missing:(resolved.missing||[]).map(function(m){ return m.linkedTo ? m : {...m, resolution:null, approvedMissing:false}; }),
+    extra:(resolved.extra||[]).map(function(e){ return e.linkedTo ? e : {...e, resolution:null}; })
+  };
 }
 // ── End pickup resolution core ──
 
@@ -593,6 +614,33 @@ function StepCard({n, title, children}){
   );
 }
 
+// Signature pad (Build 1b, Exit A). Light "paper" canvas, dark ink, so
+// the exported PNG stays legible on the white approval PDF.
+function SignaturePad({onChange}){
+  const cRef = useRef(null);
+  const drawing = useRef(false);
+  const [hasInk, setHasInk] = useState(false);
+  function pos(e){
+    var r = cRef.current.getBoundingClientRect();
+    return {x:(e.clientX-r.left)*(cRef.current.width/r.width), y:(e.clientY-r.top)*(cRef.current.height/r.height)};
+  }
+  function down(e){ e.preventDefault(); cRef.current.setPointerCapture(e.pointerId); drawing.current=true; var c=cRef.current.getContext("2d"); c.strokeStyle="#0f172a"; c.lineWidth=2.2; c.lineCap="round"; c.lineJoin="round"; var p=pos(e); c.beginPath(); c.moveTo(p.x,p.y); }
+  function move(e){ if(!drawing.current) return; var c=cRef.current.getContext("2d"); var p=pos(e); c.lineTo(p.x,p.y); c.stroke(); }
+  function up(e){ if(!drawing.current) return; drawing.current=false; setHasInk(true); onChange(cRef.current.toDataURL("image/png")); }
+  function clear(){ var c=cRef.current.getContext("2d"); c.clearRect(0,0,cRef.current.width,cRef.current.height); setHasInk(false); onChange(null); }
+  return (
+    <div>
+      <canvas ref={cRef} width={560} height={140}
+        onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+        style={{width:"100%",maxWidth:560,height:140,background:"#f8fafc",border:"1px dashed #475569",borderRadius:8,touchAction:"none",cursor:"crosshair",display:"block"}}/>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:6,maxWidth:560}}>
+        <span style={{fontSize:11,color:"#64748b"}}>{hasInk?"Signed":"Sign here"}</span>
+        <button onClick={clear} style={{background:"none",border:"1px solid #334155",borderRadius:6,color:"#94a3b8",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>Clear</button>
+      </div>
+    </div>
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════
 // APP ROOT
 // ══════════════════════════════════════════════════════════════════
@@ -724,8 +772,9 @@ function App(){
   // subscribe, hydrateAll, legacy session load, pushToFirestore) bypass the
   // wrappers on purpose and therefore never emit. No backfill: log starts at
   // go-live. WARNING: if the meaning of pickupScanned, directVendorPickup,
-  // shipment.status, ticketIds, arrivedDate or codd ever changes, revisit the
-  // detectors below -- event semantics ride on those transitions.
+  // shipment.status, ticketIds, arrivedDate, codd or approvalSignature ever
+  // changes, revisit the detectors below -- event semantics ride on those
+  // transitions.
   function emitCustody(type, fields){
     if(!userRef.current) return;
     var ev = Object.assign({
@@ -770,6 +819,16 @@ function App(){
         } else {
           emitCustody("pickup-scanned",  { ticketIds:[t.id], provenance:"scanned",  serials: custodySerials(t) });
         }
+      }
+      // In-person approval (Build 1b, Exit A): the signature appearing is the
+      // transition. Attester = the signer, email name-matched from requestors.
+      var hadSig = old ? !!old.approvalSignature : false;
+      if(!hadSig && t.approvalSignature){
+        var sName = (t.approvalSignature.printedName||"").trim();
+        var sMatch = (requestorsRef.current||[]).find(function(r){ return (r.name||"").trim().toLowerCase()===sName.toLowerCase(); });
+        emitCustody("approval-captured", { ticketIds:[t.id], serials: custodySerials(t),
+          attester: {name:sName, email:(sMatch && sMatch.email)||""},
+          note: "In-person approval signed by "+(sName||"?") });
       }
     });
   }
@@ -1677,6 +1736,7 @@ var CUSTODY_META = {
   "ticket-created":          {icon:"🎫", label:"Ticket Created",             color:"#93c5fd", border:"#1e40af"},
   "pickup-scanned":          {icon:"📷", label:"Pickup Scanned",             color:"#93c5fd", border:"#1e40af"},
   "pickup-attested":         {icon:"🖊", label:"Pickup Attested",            color:"#93c5fd", border:"#1e40af"},
+  "approval-captured":       {icon:"🖊", label:"In-Person Approval",         color:"#86efac", border:"#166534"},
   "grouped-into-shipment":   {icon:"📦", label:"Grouped into Vendor Pickup", color:"#94a3b8", border:"#334155"},
   "ungrouped-from-shipment": {icon:"📤", label:"Removed from Vendor Pickup", color:"#94a3b8", border:"#334155"},
   "vendor-handoff":          {icon:"🚛", label:"Vendor Handoff",             color:"#fbbf24", border:"#a16207"},
@@ -2076,7 +2136,7 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
 
   function doRescan(t){
     // Reset scan state, keep expected assets, send to pickup scan tab
-    saveTicket({...t, pickupScanned:false, pickupResult:null, assets:[], approvalStatus:undefined, approvalFile:undefined, approvalUploadedAt:undefined});
+    saveTicket({...t, pickupScanned:false, pickupResult:null, assets:[], approvalStatus:undefined, approvalFile:undefined, approvalUploadedAt:undefined, approvalSignature:undefined, validatedAt:undefined});
     setTab(1); // Pickup Scan tab
   }
   if(view==="new"||view==="edit") return <TicketForm ticket={active} tickets={tickets} locations={locations} requestors={requestors} onSave={saveTicket} onCancel={function(){ setView("list"); }} onDelete={function(id){ deleteTicket(id); setView("list"); }} onRescan={doRescan} isNew={view==="new"} custodyEvents={custodyEvents} readOnly={readOnly}/>;
@@ -2253,20 +2313,19 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
                       </label>
                       {t.approvalFile && (
                         <button onClick={function(){
-                          if(!confirm("Mark this ticket as validated? Pending extras will be approved and denied items removed.")) return;
+                          // Build 1b: undecided can never exit. Gate first, then apply
+                          // all consequences through finalizePickup — the one place.
+                          var prv = t.pickupResult||{matched:[],missing:[],extra:[],partial:[]};
+                          var und = undecidedCounts(prv);
+                          if(und.total>0){ alert(und.total+" item(s) undecided — open the ticket and decide each before validating."); return; }
+                          if(!confirm("Mark this ticket as validated? Recorded decisions will be applied.")) return;
                           setTickets(function(prev){ return prev.map(function(x){
                             if(x.id!==t.id) return x;
-                            // Resolve assets: approve all pending extras, remove denied extras
-                            var resolvedAssets = (x.assets||[])
-                              .filter(function(a){ return a.approved !== false; })
-                              .map(function(a){
-                                if(a.source==="scan-extra-pending" && a.approved===null){
-                                  return {...a, approved:true, source:"scan-extra"};
-                                }
-                                return a;
-                              });
-                            // Sync expectedAssets to the approved final list so ticket displays correctly
-                            var syncedExpected = resolvedAssets.map(function(a){
+                            var expMapV = {}; (x.expectedAssets||[]).forEach(function(a){ expMapV[a.serial]=a; });
+                            var prX = x.pickupResult||{matched:[],missing:[],extra:[],partial:[]};
+                            var fin = finalizePickup(prX, expMapV);
+                            var keptScans = (x.pickupScanList||[]).filter(function(s){ return fin.rejectedCaptures.indexOf(s)<0; });
+                            var syncedExpected = fin.assets.map(function(a){
                               var orig = (x.expectedAssets||[]).find(function(e){ return e.serial===a.serial; });
                               return orig ? orig : {serial:a.serial, manufacturer:a.manufacturer||"", machineType:a.machineType||"", ouInventory:a.ouInventory||"", addedAt:a.addedAt||""};
                             });
@@ -2274,7 +2333,9 @@ function TicketsTab({tickets, setTickets, setVendorReport, setTab, openTicketId,
                               ...x,
                               approvalStatus:  "validated",
                               validatedAt:     new Date().toLocaleString(),
-                              assets:          resolvedAssets,
+                              pickupScanList:  keptScans,
+                              pickupResult:    {...prX, missing:fin.missing, partial:fin.partial},
+                              assets:          fin.assets,
                               expectedAssets:  syncedExpected,
                               originalAssets:  x.originalAssets || x.expectedAssets, // freeze original on first validation
                             };
@@ -2383,6 +2444,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
 
   function regenApprovalPdf(){
     if(!pr) return;
+    var sigRec = form.approvalSignature||null;
     var jspdf = window.jspdf || window.jsPDF;
     if(!jspdf){ alert("PDF library not loaded."); return; }
     // Reconstruct resolved from pickupResult
@@ -2398,7 +2460,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
     var margin = 36;
     doc.setFillColor(15,23,42); doc.rect(0,0,pageW,60,"F");
     doc.setFont("helvetica","bold"); doc.setFontSize(16); doc.setTextColor(241,245,249);
-    doc.text("IT Asset Disposal — Approval Required", margin, 24);
+    doc.text(sigRec ? "IT Asset Disposal — Approval Record (Signed)" : "IT Asset Disposal — Approval Required", margin, 24);
     doc.setFont("helvetica","normal"); doc.setFontSize(9); doc.setTextColor(148,163,184);
     doc.text("Ticket: "+form.ticketNo+"   |   Requestor: "+(form.requestor||"—")+"   |   Site: "+(form.site||"—"), margin, 42);
     var legendItems = [
@@ -2417,22 +2479,22 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
     var bodyRows = []; var rowStyles = {};
     var idx = 0;
     resolved.missing.forEach(function(m){
-      bodyRows.push(["Missing", m.serial||"", "", m.manufacturer||"", m.machineType||"", m.ouInventory||"", ""]);
+      bodyRows.push(["Missing", m.serial||"", "", m.manufacturer||"", m.machineType||"", m.ouInventory||"", sigRec?"APPROVED":""]);
       rowStyles[idx++] = {fillColor:[254,226,226]};
     });
     // Extras from pickupResult buckets — same source as the send-time PDF (Build 1a)
     (resolved.extra||[]).forEach(function(e){
-      bodyRows.push(["Extra", "", e.serial||"", "", "", "", ""]);
+      bodyRows.push(["Extra", "", e.serial||"", "", "", "", sigRec?(e.resolution==="remove"?"DENIED":"APPROVED"):""]);
       rowStyles[idx++] = {fillColor:[219,234,254]};
     });
     actionableCorrections(resolved.partial).forEach(function(p){
-      bodyRows.push(["Proposed Correction", p.expectedSerial||"", (p.canonical||p.scannedSerial||"")+((p.scannedSerial&&p.canonical&&p.scannedSerial!==p.canonical)?"\n(captured: "+p.scannedSerial+")":""), p.manufacturer||"", p.machineType||"", p.ouInventory||"", ""]);
+      bodyRows.push(["Proposed Correction", p.expectedSerial||"", (p.canonical||p.scannedSerial||"")+((p.scannedSerial&&p.canonical&&p.scannedSerial!==p.canonical)?"\n(captured: "+p.scannedSerial+")":""), p.manufacturer||"", p.machineType||"", p.ouInventory||"", sigRec?"APPROVED":""]);
       rowStyles[idx++] = {fillColor:[254,252,202]};
     });
     // Linked pairs
     (pr.missing||[]).filter(function(m){ return m.linkedTo; }).forEach(function(m){
       var ex = (pr.extra||[]).find(function(e){ return e.id===m.linkedTo; });
-      bodyRows.push(["Proposed Correction", m.serial||"", ex?ex.serial:"", m.manufacturer||"", m.machineType||"", m.ouInventory||"", ""]);
+      bodyRows.push(["Proposed Correction", m.serial||"", ex?ex.serial:"", m.manufacturer||"", m.machineType||"", m.ouInventory||"", sigRec?"APPROVED":""]);
       rowStyles[idx++] = {fillColor:[254,252,202]};
     });
     doc.autoTable({
@@ -2454,6 +2516,15 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
     var footY = doc.lastAutoTable.finalY+20;
     doc.setFontSize(7); doc.setTextColor(148,163,184);
     doc.text("Generated by AssetTrack  |  Ticket: "+form.ticketNo+"  |  "+new Date().toLocaleString(), margin, footY);
+    if(sigRec){
+      var sh2 = doc.internal.pageSize.getHeight();
+      if(footY+78 > sh2-36){ doc.addPage(); footY = 36; }
+      try{ doc.addImage(sigRec.dataUrl, "PNG", margin, footY+10, 160, 36); }catch(err){}
+      doc.setDrawColor(148,163,184); doc.setLineWidth(0.5);
+      doc.line(margin, footY+50, margin+200, footY+50);
+      doc.setFontSize(8); doc.setTextColor(100,116,139);
+      doc.text("Requestor Signature — "+(sigRec.printedName||"")+"  |  "+(sigRec.signedAt||""), margin, footY+60);
+    }
 
     // ── Page 2: All scanned serials ──────────────────────────────
     var scanList2 = (form.pickupScanList||[]).length ? form.pickupScanList
@@ -2485,44 +2556,19 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
     doc.save("ApprovalRequest-"+form.ticketNo+".pdf");
   }
 
-  function denyExtra(serial){
+  // Build 1b: one decision writer for the awaiting-approval panel. Buttons
+  // only name their verb; consequences apply in finalizePickup at validation.
+  function setPrRes(bucket, id, val){
     setForm(function(f){
-      return {...f, assets:(f.assets||[]).map(function(a){
-        return a.serial===serial ? {...a, approved:false} : a;
-      })};
-    });
-  }
-
-  // Approve a missing item — mark it in pickupResult so handleSave knows to remove it from assets
-  function approveMissing(serial){
-    setForm(function(f){
-      var pr2 = f.pickupResult ? {...f.pickupResult,
-        missing:(f.pickupResult.missing||[]).map(function(m){
-          return m.serial===serial ? {...m, approvedMissing:true} : m;
-        })
-      } : f.pickupResult;
-      // Also remove from assets in case it was there
-      var assets2 = (f.assets||[]).filter(function(a){ return a.serial!==serial; });
-      return {...f, pickupResult:pr2, assets:assets2};
-    });
-  }
-
-  function undoMissing(serial){
-    setForm(function(f){
-      var pr2 = f.pickupResult ? {...f.pickupResult,
-        missing:(f.pickupResult.missing||[]).map(function(m){
-          return m.serial===serial ? {...m, approvedMissing:false} : m;
-        })
-      } : f.pickupResult;
+      if(!f.pickupResult) return f;
+      var pr2 = {...f.pickupResult};
+      pr2[bucket] = (pr2[bucket]||[]).map(function(it){
+        if(it.id!==id) return it;
+        var next = {...it, resolution:val};
+        if(bucket==="missing") next.approvedMissing = (val==="kept");
+        return next;
+      });
       return {...f, pickupResult:pr2};
-    });
-  }
-
-  function approveExtra(serial){
-    setForm(function(f){
-      return {...f, assets:(f.assets||[]).map(function(a){
-        return a.serial===serial ? {...a, approved:true, source:"scan-extra"} : a;
-      })};
     });
   }
 
@@ -2778,7 +2824,7 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
             <input ref={manualRef} value={manualInput} onChange={function(e){ setManualInput(e.target.value); }}
               onKeyDown={function(e){ if(e.key==="Enter") addManual(manualInput); }}
               onFocus={function(){ setManualFocus(true); }} onBlur={function(){ setManualFocus(false); }}
-              placeholder="Type or scan serial number, press Enter..."
+              placeholder="Serial numbers"
               style={{flex:1,background:"#1e293b",border:`2px solid ${manualFocus?"#3b82f6":"#334155"}`,borderRadius:8,color:"#f1f5f9",padding:"11px 14px",fontSize:14,fontFamily:"inherit",letterSpacing:1,transition:"border-color 0.2s"}}/>
             <button onClick={function(){ addManual(manualInput); }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"11px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Add</button>
           </div>
@@ -2871,17 +2917,32 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
             </details>
           )}
 
-          {/* Proposed Corrections */}
-          {(actionableCorrections(pr.partial).length+(pr.missing||[]).filter(function(m){ return m.linkedTo; }).length)>0 && (
+          {/* Proposed Corrections — verbs write pickupResult; finalizePickup applies at validation (Build 1b) */}
+          {(function(){
+            var decidable = (pr.partial||[]).filter(function(p){ return !(isNoopCorrection(p) && p.resolution==="accept"); });
+            var linkedCnt = (pr.missing||[]).filter(function(m){ return m.linkedTo; }).length;
+            if(decidable.length+linkedCnt===0) return null;
+            return (
             <div style={{background:"#1e1040",border:"1px solid #a78bfa",borderRadius:8,padding:"12px 14px",marginBottom:8}}>
-              <div style={{color:"#a78bfa",fontWeight:600,fontSize:13,marginBottom:8}}>🔧 Proposed Corrections ({actionableCorrections(pr.partial).length+(pr.missing||[]).filter(function(m){ return m.linkedTo; }).length})</div>
-              {actionableCorrections(pr.partial).map(function(p,i){
-                return <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0",borderBottom:"1px solid #2e1065",flexWrap:"wrap"}}>
+              <div style={{color:"#a78bfa",fontWeight:600,fontSize:13,marginBottom:8}}>🔧 Proposed Corrections ({decidable.length+linkedCnt})</div>
+              {decidable.map(function(p,i){
+                var acc = p.resolution==="accept", rej = p.resolution==="reject";
+                return <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"4px 0",borderBottom:"1px solid #2e1065",flexWrap:"wrap",opacity:rej?0.6:1}}>
                   <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#fca5a5",textDecoration:"line-through"}}>{p.expectedSerial}</span>
                   <span style={{color:"#6d28d9"}}>→</span>
                   <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#86efac"}}>{p.canonical||p.scannedSerial}</span>
                   {p.distance>0 && <span style={{fontSize:10,color:"#64748b"}}>{p.distance} char(s) apart</span>}
-                  {p.scannedSerial && p.canonical && p.scannedSerial!==p.canonical && <span style={{fontSize:10,color:"#64748b",fontFamily:"'Geist Mono',monospace",flexBasis:"100%"}}>captured as: {p.scannedSerial}</span>}
+                  {p.scannedSerial && p.canonical && p.scannedSerial!==p.canonical && <span style={{fontSize:10,color:"#64748b",fontFamily:"'Geist Mono',monospace"}}>captured as: {p.scannedSerial}</span>}
+                  <span style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
+                    {acc && <span style={{fontSize:10,color:"#86efac",border:"1px solid #166534",borderRadius:4,padding:"1px 6px"}}>✓ Accepted</span>}
+                    {rej && <span style={{fontSize:10,color:"#fca5a5",border:"1px solid #7f1d1d",borderRadius:4,padding:"1px 6px"}}>✕ Rejected</span>}
+                    {(acc||rej)
+                      ? <button onClick={function(){ setPrRes("partial", p.id, null); }} style={{background:"none",border:"1px solid #334155",borderRadius:5,color:"#475569",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>Undo</button>
+                      : <React.Fragment>
+                          <button onClick={function(){ setPrRes("partial", p.id, "accept"); }} style={{background:"none",border:"1px solid #10b981",borderRadius:5,color:"#86efac",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>Accept</button>
+                          <button onClick={function(){ setPrRes("partial", p.id, "reject"); }} style={{background:"none",border:"1px solid #7f1d1d",borderRadius:5,color:"#fca5a5",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>Reject</button>
+                        </React.Fragment>}
+                  </span>
                 </div>;
               })}
               {(pr.missing||[]).filter(function(m){ return m.linkedTo; }).map(function(m,i){
@@ -2894,15 +2955,16 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
                 </div>;
               })}
             </div>
-          )}
+            );
+          })()}
 
           {/* Missing */}
           {(pr.missing||[]).filter(function(m){ return !m.linkedTo; }).length>0 && (
             <div style={{background:"#200a0a",border:"1px solid #7f1d1d",borderRadius:8,padding:"12px 14px",marginBottom:8}}>
               <div style={{color:"#fca5a5",fontWeight:600,fontSize:13,marginBottom:4}}>❌ Missing ({(pr.missing||[]).filter(function(m){ return !m.linkedTo; }).length})</div>
-              <div style={{fontSize:11,color:"#64748b",marginBottom:8}}>Approve to confirm the item is missing and remove it from assets.</div>
+              <div style={{fontSize:11,color:"#64748b",marginBottom:8}}>Confirm each item the customer kept — not picked up.</div>
               {(pr.missing||[]).filter(function(m){ return !m.linkedTo; }).map(function(m,i){
-                var approved = m.approvedMissing===true;
+                var approved = m.approvedMissing===true || m.resolution==="kept";
                 return (
                   <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"5px 0",borderBottom:"1px solid #450a0a",flexWrap:"wrap",opacity:approved?0.5:1}}>
                     <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#fca5a5",textDecoration:approved?"line-through":"none"}}>{m.serial}</span>
@@ -2910,10 +2972,10 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
                     {m.machineType&&<span style={{fontSize:10,color:"#64748b"}}>{m.machineType}</span>}
                     {approved
                       ? <React.Fragment>
-                          <span style={{fontSize:10,color:"#86efac",border:"1px solid #166534",borderRadius:4,padding:"1px 6px"}}>✓ Approved Missing</span>
-                          <button onClick={function(){ undoMissing(m.serial); }} style={{marginLeft:"auto",background:"none",border:"1px solid #334155",borderRadius:5,color:"#475569",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>Undo</button>
+                          <span style={{fontSize:10,color:"#86efac",border:"1px solid #166534",borderRadius:4,padding:"1px 6px"}}>✓ Kept — not picked up</span>
+                          <button onClick={function(){ setPrRes("missing", m.id, null); }} style={{marginLeft:"auto",background:"none",border:"1px solid #334155",borderRadius:5,color:"#475569",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>Undo</button>
                         </React.Fragment>
-                      : <button onClick={function(){ approveMissing(m.serial); }} style={{marginLeft:"auto",background:"none",border:"1px solid #166534",borderRadius:5,color:"#86efac",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>✓ Approve Missing</button>
+                      : <button onClick={function(){ setPrRes("missing", m.id, "kept"); }} style={{marginLeft:"auto",background:"none",border:"1px solid #166534",borderRadius:5,color:"#86efac",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>✓ Confirm Kept</button>
                     }
                   </div>
                 );
@@ -2921,27 +2983,26 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
             </div>
           )}
 
-          {/* Extras pending approval */}
-          {(form.assets||[]).filter(function(a){ return a.source==="scan-extra-pending"; }).length>0 && (
+          {/* Extras — verbs write pickupResult; finalizePickup applies at validation (Build 1b) */}
+          {(pr.extra||[]).filter(function(e){ return !e.linkedTo; }).length>0 && (
             <div style={{background:"#0c1a2e",border:"1px solid #1e40af",borderRadius:8,padding:"12px 14px",marginBottom:8}}>
               <div style={{color:"#93c5fd",fontWeight:600,fontSize:13,marginBottom:8}}>➕ Extra — Scanned but not on ticket</div>
-              <div style={{fontSize:11,color:"#64748b",marginBottom:8}}>These items were scanned at pickup but were not on the submitted list. Approve to include them, or deny to remove them.</div>
-              {(form.assets||[]).filter(function(a){ return a.source==="scan-extra-pending"; }).map(function(a,i){
-                var denied   = a.approved===false;
-                var approved = a.approved===true;
+              <div style={{fontSize:11,color:"#64748b",marginBottom:8}}>Include to add each item to the record, or remove it.</div>
+              {(pr.extra||[]).filter(function(e){ return !e.linkedTo; }).map(function(x,i){
+                var inc = x.resolution==="include", rem = x.resolution==="remove";
                 return (
-                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"1px solid #1e293b",flexWrap:"wrap",opacity:denied?0.4:1}}>
-                    <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#93c5fd",textDecoration:denied?"line-through":"none"}}>{a.serial}</span>
-                    {approved && <span style={{fontSize:10,color:"#86efac",border:"1px solid #166534",borderRadius:4,padding:"1px 6px"}}>✓ Approved</span>}
-                    {denied   && <span style={{fontSize:10,color:"#fca5a5",border:"1px solid #7f1d1d",borderRadius:4,padding:"1px 6px"}}>✗ Denied</span>}
-                    {!denied && !approved && (
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"1px solid #1e293b",flexWrap:"wrap",opacity:rem?0.4:1}}>
+                    <span style={{fontFamily:"'Geist Mono',monospace",fontSize:12,color:"#93c5fd",textDecoration:rem?"line-through":"none"}}>{x.serial}</span>
+                    {inc && <span style={{fontSize:10,color:"#86efac",border:"1px solid #166534",borderRadius:4,padding:"1px 6px"}}>✓ Included</span>}
+                    {rem && <span style={{fontSize:10,color:"#fca5a5",border:"1px solid #7f1d1d",borderRadius:4,padding:"1px 6px"}}>✕ Removed</span>}
+                    {!inc && !rem && (
                       <div style={{marginLeft:"auto",display:"flex",gap:6}}>
-                        <button onClick={function(){ approveExtra(a.serial); }} style={{background:"none",border:"1px solid #166534",borderRadius:5,color:"#86efac",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>✓ Approve</button>
-                        <button onClick={function(){ denyExtra(a.serial); }} style={{background:"none",border:"1px solid #7f1d1d",borderRadius:5,color:"#fca5a5",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>✗ Deny</button>
+                        <button onClick={function(){ setPrRes("extra", x.id, "include"); }} style={{background:"none",border:"1px solid #166534",borderRadius:5,color:"#86efac",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>✓ Include</button>
+                        <button onClick={function(){ setPrRes("extra", x.id, "remove"); }} style={{background:"none",border:"1px solid #7f1d1d",borderRadius:5,color:"#fca5a5",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>✗ Remove</button>
                       </div>
                     )}
-                    {(denied||approved) && (
-                      <button onClick={function(){ setForm(function(f){ return {...f, assets:(f.assets||[]).map(function(x){ return x.serial===a.serial?{...x,approved:null,source:"scan-extra-pending"}:x; })}; }); }} style={{marginLeft:"auto",background:"none",border:"1px solid #334155",borderRadius:5,color:"#475569",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>Undo</button>
+                    {(inc||rem) && (
+                      <button onClick={function(){ setPrRes("extra", x.id, null); }} style={{marginLeft:"auto",background:"none",border:"1px solid #334155",borderRadius:5,color:"#475569",cursor:"pointer",fontSize:10,padding:"2px 8px",fontFamily:"inherit"}}>Undo</button>
                     )}
                   </div>
                 );
@@ -3280,6 +3341,8 @@ function PickupScanForm({ticket, onSave, onBack}){
     return new Set();
   });
   const [directPickup, setDirectPickup] = useState(false);
+  const [sigData, setSigData]       = useState(null); // Exit A signature (PNG data URL)
+  const [sigName, setSigName]       = useState("");
   const [linkingId, setLinkingId]   = useState(null); // missing item id currently being linked
   const [links, setLinks]           = useState({});    // {missingId: extraId, extraId: missingId}
   const inputRef = useRef();
@@ -3471,11 +3534,11 @@ function PickupScanForm({ticket, onSave, onBack}){
     if(!result) return null;
     var missing = result.missing.map(function(item){
       var linkedExtraId = links[item.id];
-      return {...item, linkedTo: linkedExtraId||null, resolution: linkedExtraId ? "linked" : null};
+      return {...item, linkedTo: linkedExtraId||null, resolution: linkedExtraId ? "linked" : (resolutions[item.id]||null)};
     });
     var extra = result.extra.map(function(item){
       var linkedMissingId = links[item.id];
-      return {...item, linkedTo: linkedMissingId||null, resolution: linkedMissingId ? "linked" : null};
+      return {...item, linkedTo: linkedMissingId||null, resolution: linkedMissingId ? "linked" : (resolutions[item.id]||null)};
     });
     var partial = result.partial.map(function(item){ return {...item, resolution: effRes(item)}; });
     return {...result, missing:missing, extra:extra, partial:partial};
@@ -3507,7 +3570,7 @@ function PickupScanForm({ticket, onSave, onBack}){
     onBack();
   }
 
-  function generateApprovalPdf(resolved){
+  function generateApprovalPdf(resolved, signature){
     var jspdf = window.jspdf || window.jsPDF;
     var doc = new jspdf.jsPDF({orientation:"landscape", unit:"pt", format:"letter"});
 
@@ -3520,7 +3583,7 @@ function PickupScanForm({ticket, onSave, onBack}){
     doc.setFont("helvetica","bold");
     doc.setFontSize(16);
     doc.setTextColor(241,245,249);
-    doc.text("IT Asset Disposal — Approval Request", margin, 24);
+    doc.text(signature ? "IT Asset Disposal — Approval Record (Signed)" : "IT Asset Disposal — Approval Request", margin, 24);
     doc.setFont("helvetica","normal");
     doc.setFontSize(9);
     doc.setTextColor(148,163,184);
@@ -3529,7 +3592,7 @@ function PickupScanForm({ticket, onSave, onBack}){
     // ── Instructions ─────────────────────────────────────────────
     doc.setFontSize(9);
     doc.setTextColor(100,116,139);
-    doc.text("Please review each item below, enter APPROVED or DENIED in the Decision column, sign at the bottom, and return this document.", margin, 76);
+    doc.text(signature ? "Decisions recorded in person; signed below." : "Please review each item below, enter APPROVED or DENIED in the Decision column, sign at the bottom, and return this document.", margin, 76);
 
     // ── Color legend ─────────────────────────────────────────────
     var lx = margin;
@@ -3563,7 +3626,7 @@ function PickupScanForm({ticket, onSave, onBack}){
         m.manufacturer||"",
         m.machineType||"",
         m.ouInventory||"",
-        ""
+        signature ? "APPROVED" : ""
       ]);
       rowStyles[rowIdx] = {fillColor:[254,226,226]};
       rowIdx++;
@@ -3579,7 +3642,7 @@ function PickupScanForm({ticket, onSave, onBack}){
         "",
         "",
         "",
-        ""
+        signature ? (e.resolution==="remove" ? "DENIED" : "APPROVED") : ""
       ]);
       rowStyles[rowIdx] = {fillColor:[219,234,254]};
       rowIdx++;
@@ -3595,7 +3658,7 @@ function PickupScanForm({ticket, onSave, onBack}){
         m.manufacturer||"",
         m.machineType||"",
         m.ouInventory||"",
-        ""
+        signature ? "APPROVED" : ""
       ]);
       rowStyles[rowIdx] = {fillColor:[254,252,202]};
       rowIdx++;
@@ -3608,7 +3671,7 @@ function PickupScanForm({ticket, onSave, onBack}){
         p.manufacturer||"",
         p.machineType||"",
         p.ouInventory||"",
-        ""
+        signature ? "APPROVED" : ""
       ]);
       rowStyles[rowIdx] = {fillColor:[254,252,202]};
       rowIdx++;
@@ -3672,7 +3735,15 @@ function PickupScanForm({ticket, onSave, onBack}){
     doc.setTextColor(100,116,139);
     doc.text("Requestor Signature",     margin,       sigY+40);
     doc.text("Date",                    margin+220,   sigY+40);
-    doc.text("Printed Name: "+(ticket.requestor||"_______________________"), margin, sigY+60);
+    if(signature){
+      try{ doc.addImage(signature.dataUrl, "PNG", margin+4, sigY-8, 160, 36); }catch(err){}
+      doc.setFontSize(9); doc.setTextColor(15,23,42);
+      doc.text(signature.signedAt||"", margin+220, sigY+24);
+      doc.setFontSize(8); doc.setTextColor(100,116,139);
+      doc.text("Printed Name: "+(signature.printedName||""), margin, sigY+60);
+    } else {
+      doc.text("Printed Name: "+(ticket.requestor||"_______________________"), margin, sigY+60);
+    }
 
     doc.setFontSize(7);
     doc.setTextColor(148,163,184);
@@ -3714,7 +3785,8 @@ function PickupScanForm({ticket, onSave, onBack}){
   }
 
   function saveAndClose(){
-    const resolved = getResolved();
+    // Exit B: in-person clicks cleared; every discrepancy restates fresh.
+    const resolved = needsApproval ? restateForApproval(getResolved()) : getResolved();
     const fin = finalizePickup(resolved, expMap);
     const resolvedOut = {...resolved, missing:fin.missing, partial:fin.partial};
     const keptScans = scanned.filter(function(s){ return fin.rejectedCaptures.indexOf(s)<0; });
@@ -3742,10 +3814,33 @@ function PickupScanForm({ticket, onSave, onBack}){
     onBack();
   }
 
+  // Exit A (Build 1b): terminal in-person approval. Gate: every discrepancy
+  // decided + signature + printed name. Verified in one step; the signed
+  // PDF is generated automatically as the filed record.
+  function signAndVerify(){
+    const resolvedA = getResolved();
+    const fin = finalizePickup(resolvedA, expMap);
+    const resolvedOut = {...resolvedA, missing:fin.missing, partial:fin.partial};
+    const keptScans = scanned.filter(function(s){ return fin.rejectedCaptures.indexOf(s)<0; });
+    const now = new Date().toLocaleString();
+    const sig = {dataUrl:sigData, printedName:sigName.trim(), signedAt:now};
+    generateApprovalPdf(resolvedOut, sig);
+    onSave({...ticket, pickupScanned:true, pickupScanList:keptScans,
+      pickupResult:{...resolvedOut, waived:waivedSerialsFrom(waived), waivedLines:Array.from(waived)},
+      assets:fin.assets, approvalStatus:"validated", approvalSentAt:now, validatedAt:now,
+      approvalSignature:sig,
+      originalAssets: ticket.originalAssets || ticket.expectedAssets,
+      expectedAssets: fin.assets.map(function(a){
+        var orig = (ticket.expectedAssets||[]).find(function(e){ return e.serial===a.serial; });
+        return orig ? orig : {serial:a.serial, manufacturer:a.manufacturer||"", machineType:a.machineType||"", ouInventory:a.ouInventory||"", addedAt:a.addedAt||""};
+      })});
+    onBack();
+  }
+
   const resolved = getResolved();
-  // Save guard (Build 1a): every correction must be decided before save
-  const undecidedPartials = result ? result.partial.filter(function(p){ var e=effRes(p); return e!=="accept" && e!=="reject"; }).length : 0;
-  const canSave = !!result && undecidedPartials===0;
+  // Build 1b: the undecided gate guards Exit A only; Exit B restates everything fresh.
+  const undecided = resolved ? undecidedCounts(resolved) : {partials:0, missing:0, extras:0, total:0};
+  const canSave = !!result;
   // Approval needed if any unlinked missing, unlinked extra, or partial/linked corrections exist
   const needsApproval = result && (
     result.missing.some(function(m){ return !links[m.id]; }) ||
@@ -3753,7 +3848,7 @@ function PickupScanForm({ticket, onSave, onBack}){
     result.partial.some(function(p){ return !(isNoopCorrection(p) && effRes(p)==="accept"); }) ||
     Object.keys(links).length > 0
   );
-  const unresolvedCount = 0; // kept for compat — no per-item decisions in new model
+  const exitAReady = !!result && undecided.total===0 && !!sigData && !!sigName.trim();
 
   return (
     <div>
@@ -3773,7 +3868,7 @@ function PickupScanForm({ticket, onSave, onBack}){
             onKeyDown={function(e){ if(e.key==="Enter") addScan(input); }}
             onPaste={handlePaste}
             onFocus={function(){ setFocus(true); }} onBlur={function(){ setFocus(false); }}
-            placeholder="Scan or paste serials from Excel..."
+            placeholder="Serial numbers"
             style={{flex:1,background:"#0f172a",border:`2px solid ${focus?"#3b82f6":"#334155"}`,borderRadius:8,color:"#f1f5f9",padding:"11px 14px",fontSize:14,fontFamily:"inherit",letterSpacing:1,transition:"border-color 0.2s"}}/>
           <button onClick={function(){ addScan(input); }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"11px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Add</button>
         </div>
@@ -3946,6 +4041,7 @@ function PickupScanForm({ticket, onSave, onBack}){
                 const isLinked = !!links[item.id];
                 const linkedExtra = isLinked ? result.extra.find(function(e){ return e.id===links[item.id]; }) : null;
                 const isLinking = linkingId===item.id;
+                const kept = (resolutions[item.id]||item.resolution)==="kept";
                 return (
                   <div key={item.id} style={{background:isLinked?"#0a1f0a":isLinking?"#0c1a2e":"#200a0a",border:"1px solid "+(isLinked?"#166534":isLinking?"#3b82f6":"#fca5a544"),borderRadius:8,padding:"12px 16px",marginBottom:8}}>
                     <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
@@ -3965,12 +4061,20 @@ function PickupScanForm({ticket, onSave, onBack}){
                           <button onClick={function(){ unlink(item.id); }} style={{background:"none",border:"1px solid #475569",borderRadius:6,color:"#94a3b8",cursor:"pointer",fontSize:11,padding:"4px 10px",fontFamily:"inherit"}}>Unlink</button>
                         </div>
                       ) : (
+                        kept ? (
+                          <div style={{display:"flex",alignItems:"center",gap:8}}>
+                            <span style={{fontSize:11,color:"#86efac",border:"1px solid #166534",borderRadius:5,padding:"3px 10px"}}>✓ Kept — not picked up</span>
+                            <button onClick={function(){ setRes(item.id,null); }} style={{background:"none",border:"1px solid #334155",borderRadius:5,color:"#94a3b8",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>Undo</button>
+                          </div>
+                        ) : (
                         <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <button onClick={function(){ setRes(item.id,"kept"); }} title="Customer kept the item — confirmed not picked up" style={{background:"#0f172a",border:"1px solid #166534",borderRadius:6,color:"#86efac",cursor:"pointer",fontSize:12,padding:"7px 14px",fontFamily:"inherit",fontWeight:500}}>✓ Kept</button>
                           <button onClick={function(){ setLinkingId(isLinking?null:item.id); }} style={{background:isLinking?"#1d4ed8":"#0f172a",border:"1px solid "+(isLinking?"#3b82f6":"#334155"),borderRadius:6,color:isLinking?"#fff":"#93c5fd",cursor:"pointer",fontSize:12,padding:"7px 14px",fontFamily:"inherit",fontWeight:500}}>
                             {isLinking ? "× Cancel Link" : "🔗 Link to Extra"}
                           </button>
                           <button onClick={function(){ waiveFromResult(item.expIdx, item.serial); }} title="Waive — will not count as missing (e.g. an untracked printer or monitor)" style={{background:"#2e1065",border:"1px solid #7c3aed",borderRadius:6,color:"#c4b5fd",cursor:"pointer",fontSize:12,padding:"7px 14px",fontFamily:"inherit",fontWeight:500}}>⊘ Waive</button>
                         </div>
+                        )
                       )}
                     </div>
                   </div>
@@ -3985,6 +4089,7 @@ function PickupScanForm({ticket, onSave, onBack}){
               {result.extra.map(function(item){
                 const isLinked = !!links[item.id];
                 const linkedMissing = isLinked ? result.missing.find(function(m){ return m.id===links[item.id]; }) : null;
+                const xres = resolutions[item.id]||item.resolution||null;
                 return (
                   <div key={item.id} style={{background:isLinked?"#0a1f0a":"#1a1200",border:"1px solid "+(isLinked?"#166534":linkingId&&!isLinked?"#f59e0b":"#fde04744"),borderRadius:8,padding:"12px 16px",marginBottom:8}}>
                     <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
@@ -3998,7 +4103,22 @@ function PickupScanForm({ticket, onSave, onBack}){
                         <button onClick={function(){ linkPair(linkingId, item.id); }} style={{background:"linear-gradient(135deg,#1e3a5f,#1d4ed8)",border:"1px solid #3b82f6",borderRadius:6,color:"#fff",cursor:"pointer",fontSize:12,padding:"7px 14px",fontFamily:"inherit",fontWeight:600}}>
                           🔗 Link here
                         </button>
-                      ) : null}
+                      ) : xres==="include" ? (
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{fontSize:11,color:"#86efac",border:"1px solid #166534",borderRadius:5,padding:"3px 10px"}}>✓ Included</span>
+                          <button onClick={function(){ setRes(item.id,null); }} style={{background:"none",border:"1px solid #334155",borderRadius:5,color:"#94a3b8",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>Undo</button>
+                        </div>
+                      ) : xres==="remove" ? (
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{fontSize:11,color:"#fca5a5",border:"1px solid #7f1d1d",borderRadius:5,padding:"3px 10px"}}>✕ Removed</span>
+                          <button onClick={function(){ setRes(item.id,null); }} style={{background:"none",border:"1px solid #334155",borderRadius:5,color:"#94a3b8",cursor:"pointer",fontSize:11,padding:"3px 10px",fontFamily:"inherit"}}>Undo</button>
+                        </div>
+                      ) : (
+                        <div style={{display:"flex",gap:6}}>
+                          <button onClick={function(){ setRes(item.id,"include"); }} title="Add to the record" style={{background:"#0f172a",color:"#86efac",border:"1px solid #10b981",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>Include</button>
+                          <button onClick={function(){ setRes(item.id,"remove"); }} title="Do not record" style={{background:"#0f172a",color:"#fca5a5",border:"1px solid #7f1d1d",borderRadius:5,padding:"5px 12px",cursor:"pointer",fontSize:12,fontFamily:"inherit",fontWeight:500}}>Remove</button>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -4022,12 +4142,30 @@ function PickupScanForm({ticket, onSave, onBack}){
             )}
           </div>
 
-          <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",gap:14}}>
-            {undecidedPartials>0 && <div style={{color:"#fbbf24",fontSize:12}}>{undecidedPartials+" correction"+(undecidedPartials!==1?"s":"")+" undecided — accept or reject each before saving"}</div>}
-            <button onClick={saveAndClose} disabled={!canSave} style={{background:canSave?"linear-gradient(135deg,#065f46,#0284c7)":"#334155",color:canSave?"#fff":"#64748b",border:"none",borderRadius:8,padding:"12px 32px",cursor:canSave?"pointer":"not-allowed",fontSize:14,fontFamily:"inherit",fontWeight:500}}>
-              {needsApproval ? "Save & Send for Approval ✉" : "Save & Close Ticket ✓"}
-            </button>
-          </div>
+          {needsApproval ? (
+            <div>
+              <div style={{background:"#1e293b",border:"1px solid #334155",borderRadius:12,padding:"18px 22px",marginBottom:14}}>
+                <div style={{fontFamily:"'Geist',sans-serif",fontWeight:700,fontSize:14,color:"#f1f5f9",marginBottom:4}}>✍ Customer Approval — In Person</div>
+                <div style={{fontSize:12,color:"#94a3b8",marginBottom:12}}>Decide every item above, then sign to verify.</div>
+                {undecided.total>0 && <div style={{color:"#fbbf24",fontSize:12,marginBottom:10}}>{undecided.total+" item"+(undecided.total!==1?"s":"")+" undecided"}</div>}
+                <SignaturePad onChange={setSigData}/>
+                <div style={{display:"flex",gap:10,alignItems:"center",marginTop:10,flexWrap:"wrap"}}>
+                  <input value={sigName} onChange={function(e){ setSigName(e.target.value); }} placeholder="Printed name"
+                    style={{flex:1,minWidth:180,background:"#0f172a",border:"1px solid #334155",borderRadius:7,color:"#f1f5f9",padding:"9px 12px",fontSize:13,fontFamily:"inherit"}}/>
+                  <span style={{fontSize:12,color:"#94a3b8"}}>{new Date().toLocaleDateString()}</span>
+                  <button onClick={signAndVerify} disabled={!exitAReady} style={{background:exitAReady?"linear-gradient(135deg,#052e16,#166534)":"#334155",color:exitAReady?"#86efac":"#64748b",border:"1px solid "+(exitAReady?"#166534":"#334155"),borderRadius:8,padding:"11px 26px",cursor:exitAReady?"pointer":"not-allowed",fontSize:13,fontFamily:"inherit",fontWeight:600}}>✓ Sign & Verify</button>
+                </div>
+              </div>
+              <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",gap:14}}>
+                <span style={{fontSize:12,color:"#64748b"}}>Customer not present? Every item restates on the sent form.</span>
+                <button onClick={saveAndClose} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"12px 32px",cursor:"pointer",fontSize:14,fontFamily:"inherit",fontWeight:500}}>Save & Send for Approval ✉</button>
+              </div>
+            </div>
+          ) : (
+            <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",gap:14}}>
+              <button onClick={saveAndClose} disabled={!canSave} style={{background:canSave?"linear-gradient(135deg,#065f46,#0284c7)":"#334155",color:canSave?"#fff":"#64748b",border:"none",borderRadius:8,padding:"12px 32px",cursor:canSave?"pointer":"not-allowed",fontSize:14,fontFamily:"inherit",fontWeight:500}}>Save & Close Ticket ✓</button>
+            </div>
+          )}
         </div>
       )}
 

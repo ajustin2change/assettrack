@@ -23,6 +23,8 @@ eval(extract("custodySerials"));
 eval(extract("shipVendorRef"));
 eval(extract("shipmentSerials"));
 eval(extract("detectShipmentCustody"));
+eval(extract("attesterFor"));
+eval(extract("detectTicketCustody"));
 
 let pass=0, fail=0;
 function T(name, fn){ try{ fn(); pass++; console.log("PASS ", name); } catch(e){ fail++; console.log("FAIL ", name, "-", e.message); } }
@@ -104,6 +106,40 @@ T("codd on new shipment doc (old undefined) emits attach not replace", ()=>{
   const attach = events.filter(e=>e.type==="codd-attached");
   if(attach.length!==1) throw new Error("codd events "+attach.length);
   if(!/^CoDD attached #C-9/.test(attach[0].note)) throw new Error(attach[0].note);
+});
+// ── Build 1b: in-person approval capture (detectTicketCustody) ──
+const tBase = {id:"t1", pickupScanned:true, assets:[{serial:"AAA111"},{serial:"BBB222"}]};
+T("approvalSignature appearing emits exactly one approval-captured with signer attester", ()=>{
+  events.length=0;
+  requestorsRef.current = [{name:"Jane Doe", email:"jane.doe@ouhsc.edu"}];
+  const a = {...tBase};
+  const b = {...tBase, approvalStatus:"validated", approvalSignature:{dataUrl:"data:image/png;base64,x", printedName:"Jane Doe", signedAt:"7/22/2026, 9:00:00 AM"}};
+  detectTicketCustody([a],[b]);
+  requestorsRef.current = [];
+  if(events.length!==1) throw new Error("expected 1, got "+events.map(e=>e.type));
+  const e=last();
+  if(e.type!=="approval-captured") throw new Error("type "+e.type);
+  if(!e.attester || e.attester.name!=="Jane Doe") throw new Error("attester "+JSON.stringify(e.attester));
+  if(e.attester.email!=="jane.doe@ouhsc.edu") throw new Error("requestor email not snapshotted: "+e.attester.email);
+  if(e.serials.length!==2) throw new Error("serials "+e.serials.length);
+  if(!/^In-person approval signed by Jane Doe/.test(e.note)) throw new Error("note "+e.note);
+});
+T("resave with the same signature emits nothing", ()=>{
+  events.length=0;
+  const sig = {dataUrl:"data:image/png;base64,x", printedName:"Jane Doe", signedAt:"7/22/2026, 9:00:00 AM"};
+  const a = {...tBase, approvalStatus:"validated", approvalSignature:sig};
+  const b = {...a};
+  detectTicketCustody([a],[b]);
+  if(events.length!==0) throw new Error("expected 0, got "+events.map(e=>e.type));
+});
+T("pickupScanned transition still emits pickup-scanned only (no spurious approval event)", ()=>{
+  events.length=0;
+  const a = {...tBase, pickupScanned:false};
+  const b = {...tBase, pickupScanned:true};
+  detectTicketCustody([a],[b]);
+  const types = events.map(e=>e.type);
+  if(types.filter(t=>t==="pickup-scanned").length!==1) throw new Error("pickup-scanned count wrong: "+types);
+  if(types.indexOf("approval-captured")>=0) throw new Error("spurious approval-captured");
 });
 console.log(pass+" passed, "+fail+" failed");
 process.exit(fail?1:0);

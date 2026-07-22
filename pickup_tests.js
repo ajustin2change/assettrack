@@ -33,7 +33,7 @@ const coreSrc = slice(
   "// \u2500\u2500 Correction-row visualization (Phase 2b) \u2500\u2500",
   "pickup resolution core");
 const core = new Function(coreSrc +
-  "\nreturn {isNoopCorrection:isNoopCorrection, actionableCorrections:actionableCorrections, finalizePickup:finalizePickup};")();
+  "\nreturn {isNoopCorrection:isNoopCorrection, actionableCorrections:actionableCorrections, finalizePickup:finalizePickup, undecidedCounts:undecidedCounts, restateForApproval:restateForApproval};")();
 
 // Harness ---------------------------------------------------------------------
 let pass = 0, fail = 0;
@@ -160,6 +160,89 @@ t("isNoopCorrection: verbatim exact only", function(){
   eq(core.isNoopCorrection(partial({matchKind:"exact", canonical:"HGXCTN2", expectedSerial:"HGXCTN2"})), true, "exact verbatim");
   eq(core.isNoopCorrection(partial({matchKind:"fuzzy", canonical:"HGXCTN2", expectedSerial:"HGXCTN2"})), false, "fuzzy never no-op");
   eq(core.isNoopCorrection(partial({matchKind:"exact", canonical:"HGXCTN3", expectedSerial:"HGXCTN2"})), false, "differing serials");
+});
+
+console.log("finalizePickup \u2014 extra verbs (Build 1b)");
+t("included extra becomes an approved scan-extra asset", function(){
+  const out = core.finalizePickup(base({extra:[{id:"ext:ZZTOP99001", serial:"ZZTOP99001", type:"extra", resolution:"include"}]}), EXPMAP);
+  const a = out.assets.find(function(x){ return x.serial==="ZZTOP99001"; });
+  assert(a, "included extra missing from assets");
+  eq(a.source, "scan-extra", "source");
+  eq(a.approved, true, "approved");
+});
+t("removed extra reaches no assets and is not a rejected capture", function(){
+  const out = core.finalizePickup(base({extra:[{id:"ext:ZZTOP99001", serial:"ZZTOP99001", type:"extra", resolution:"remove"}]}), EXPMAP);
+  assert(!out.assets.some(function(x){ return x.serial==="ZZTOP99001"; }), "removed extra leaked into assets");
+  assert(out.rejectedCaptures.indexOf("ZZTOP99001") < 0, "removed extra wrongly queued for scan-list pruning");
+});
+t("undecided extra stays a pending asset (unchanged 1a behavior)", function(){
+  const out = core.finalizePickup(base({extra:[{id:"ext:ZZTOP99001", serial:"ZZTOP99001", type:"extra", resolution:null}]}), EXPMAP);
+  const a = out.assets.find(function(x){ return x.serial==="ZZTOP99001"; });
+  assert(a && a.source==="scan-extra-pending" && a.approved===null, "pending extra shape changed");
+});
+
+console.log("finalizePickup \u2014 missing kept (Build 1b)");
+t("kept missing is marked approvedMissing and never enters assets", function(){
+  const out = core.finalizePickup(base({missing:[{id:"exp:2", expIdx:2, serial:"HGXCTN2", type:"missing", resolution:"kept"}]}), EXPMAP);
+  const m = out.missing.find(function(x){ return x.serial==="HGXCTN2"; });
+  assert(m && m.approvedMissing===true, "kept missing not marked");
+  assert(!out.assets.some(function(x){ return x.serial==="HGXCTN2"; }), "kept missing leaked into assets");
+});
+t("undecided missing passes through unmarked", function(){
+  const out = core.finalizePickup(base({missing:[{id:"exp:2", expIdx:2, serial:"HGXCTN2", type:"missing", resolution:null}]}), EXPMAP);
+  const m = out.missing.find(function(x){ return x.serial==="HGXCTN2"; });
+  assert(m && !m.approvedMissing, "undecided missing wrongly marked");
+});
+
+console.log("undecidedCounts \u2014 the exit gate (Build 1b)");
+t("mixed set counts only genuinely open items", function(){
+  const r = base({
+    partial:[partial({resolution:"accept"}), partial({id:"exp:1", resolution:"reject"}), partial({id:"exp:9", resolution:null})],
+    missing:[{id:"exp:2", serial:"HGXCTN2", resolution:"kept"}, {id:"exp:3", serial:"C0WQ4TYJ1G5", resolution:null}, {id:"exp:4", serial:"L1", linkedTo:"ext:L1", resolution:"linked"}],
+    extra:[{id:"ext:A", serial:"A1234567", resolution:"include"}, {id:"ext:B", serial:"B1234567", resolution:"remove"}, {id:"ext:C", serial:"C1234567", resolution:null}, {id:"ext:L1", serial:"L1X", linkedTo:"exp:4", resolution:"linked"}]
+  });
+  const u = core.undecidedCounts(r);
+  eq(u.partials, 1, "partials"); eq(u.missing, 1, "missing"); eq(u.extras, 1, "extras"); eq(u.total, 3, "total");
+});
+t("legacy approvedMissing counts as decided", function(){
+  const u = core.undecidedCounts(base({missing:[{id:"exp:2", serial:"HGXCTN2", approvedMissing:true}]}));
+  eq(u.total, 0, "total");
+});
+t("Exit A is impossible with any undecided row", function(){
+  const u = core.undecidedCounts(base({partial:[partial({resolution:null})]}));
+  assert(u.total > 0, "gate open with a pending correction");
+});
+
+console.log("restateForApproval \u2014 Exit B wipe (Build 1b)");
+t("clicks clear; machine defaultResolution survives; links survive", function(){
+  const r = base({
+    partial:[partial({resolution:"accept"}), partial({id:"exp:1", matchKind:"exact", defaultResolution:"accept", resolution:"accept"})],
+    missing:[{id:"exp:2", serial:"HGXCTN2", resolution:"kept", approvedMissing:true}, {id:"exp:4", serial:"L1", linkedTo:"ext:L1", resolution:"linked"}],
+    extra:[{id:"ext:A", serial:"A1234567", resolution:"remove"}, {id:"ext:L1", serial:"L1X", linkedTo:"exp:4", resolution:"linked"}]
+  });
+  const out = core.restateForApproval(r);
+  eq(out.partial[0].resolution, null, "clicked fuzzy accept survived the wipe");
+  eq(out.partial[1].resolution, "accept", "exact defaultResolution wiped");
+  eq(out.missing[0].resolution, null, "kept click survived");
+  eq(out.missing[0].approvedMissing, false, "approvedMissing survived");
+  eq(out.missing[1].resolution, "linked", "linked missing disturbed");
+  eq(out.extra[0].resolution, null, "remove click survived");
+  eq(out.extra[1].resolution, "linked", "linked extra disturbed");
+});
+t("restate then finalize: pending fuzzy is a proposed correction, never an asset (incident regression)", function(){
+  const restated = core.restateForApproval(base({partial:[partial({resolution:"accept"})]}));
+  const out = core.finalizePickup(restated, EXPMAP);
+  assert(!out.assets.some(function(x){ return x.serial==="F9FV58ANGHKJ" || x.serial==="F9FV5BANGHKJ"; }), "wiped correction leaked into assets");
+  eq(out.partial.length, 1, "proposed correction lost");
+});
+t("all-decided finalize leaves no pending sources (signed-record invariant)", function(){
+  const out = core.finalizePickup(base({
+    matched:[{id:"exp:0", serial:"C0WQ4TYJ1G5"}],
+    partial:[partial({resolution:"accept"})],
+    missing:[{id:"exp:2", serial:"HGXCTN2", resolution:"kept"}],
+    extra:[{id:"ext:A", serial:"A1234567", resolution:"include"}, {id:"ext:B", serial:"B1234567", resolution:"remove"}]
+  }), EXPMAP);
+  assert(!out.assets.some(function(x){ return x.source==="scan-extra-pending"; }), "pending source on a signed record");
 });
 
 console.log("");
