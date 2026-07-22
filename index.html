@@ -260,8 +260,39 @@ function isNoopCorrection(p){
     String(p.canonical||"").trim().toUpperCase()===String(p.expectedSerial||"").trim().toUpperCase();
 }
 function actionableCorrections(list){
-  return (list||[]).filter(function(p){ return !(isNoopCorrection(p) && p.resolution==="accept"); });
+  return (list||[]).filter(function(p){ return p.resolution!=="reject" && !(isNoopCorrection(p) && p.resolution==="accept"); });
 }
+
+// ── Pickup resolution core (Build 1a) ──
+// The ONE place decision consequences are applied. Accept: record the
+// corrected serial. Reject: device was not taken — capture is discarded,
+// expected serial becomes Missing. Pending: stays a proposed correction,
+// NEVER enters assets. Extracted and exercised by pickup_tests.js.
+function finalizePickup(resolved, expMap){
+  var now = new Date().toLocaleString();
+  function infoFor(serial){ var a=expMap[serial]||{}; return {manufacturer:a.manufacturer||"",machineType:a.machineType||"",ouInventory:a.ouInventory||""}; }
+  var assets = [];
+  var missing = (resolved.missing||[]).slice();
+  var rejectedCaptures = [];
+  (resolved.matched||[]).forEach(function(m){ assets.push({serial:m.serial, ...infoFor(m.serial), addedAt:now, source:"scan"}); });
+  (resolved.partial||[]).forEach(function(p){
+    if(p.resolution==="accept"){
+      assets.push({serial:p.canonical||p.scannedSerial, ...infoFor(p.expectedSerial), addedAt:now, source:"scan-"+(p.matchKind||"partial")});
+    } else if(p.resolution==="reject"){
+      rejectedCaptures.push(p.scannedSerial);
+      missing.push({id:p.id, expIdx:p.expIdx, serial:p.expectedSerial, ...infoFor(p.expectedSerial), type:"missing", resolution:null, fromRejected:true});
+    }
+  });
+  (resolved.extra||[]).forEach(function(e){
+    if(e.linkedTo) assets.push({serial:e.serial, ...infoFor(e.linkedTo), addedAt:now, source:"scan-linked"});
+  });
+  (resolved.extra||[]).forEach(function(e){
+    if(!e.linkedTo) assets.push({serial:e.serial, manufacturer:"", machineType:"", ouInventory:"", addedAt:now, source:"scan-extra-pending", approved:null});
+  });
+  var partial = (resolved.partial||[]).filter(function(p){ return p.resolution!=="reject"; });
+  return {assets:assets, missing:missing, partial:partial, rejectedCaptures:rejectedCaptures};
+}
+// ── End pickup resolution core ──
 
 // ── Correction-row visualization (Phase 2b) ──
 function highlightToken(original, token){
@@ -453,74 +484,6 @@ async function fsaWrite(fileHandle, tickets, shipments, locations, requestors){
   } catch(e){ console.error("Auto-save failed:", e); return false; }
 }
 
-// Bulk folder import — reads all .xlsx files in subfolders
-async function runFolderImport(setTickets, setVendorReport, onResult){
-  try {
-    const dirHandle = await window.showDirectoryPicker({mode:"read"});
-    const preview = [];
-
-    // Collect subfolder entries
-    const subfolders = [];
-    const topIter = dirHandle.entries();
-    let topNext = await topIter.next();
-    while(!topNext.done){
-      const [subName, subHandle] = topNext.value;
-      if(subHandle.kind === "directory") subfolders.push({subName, subHandle});
-      topNext = await topIter.next();
-    }
-
-    // For each subfolder, collect xlsx files
-    for(let si=0; si<subfolders.length; si++){
-      const {subName, subHandle} = subfolders[si];
-      const fileIter = subHandle.entries();
-      let fileNext = await fileIter.next();
-      while(!fileNext.done){
-        const [fileName, fileHandle] = fileNext.value;
-        if(fileHandle.kind === "file" && /\.(xlsx|xls)$/i.test(fileName)){
-          const ticketNo = fileName.replace(/\.(xlsx|xls)$/i,"").trim();
-          const file = await fileHandle.getFile();
-          const result = await readXlsxFile(file);
-          preview.push({ticketNo, fileName, subFolder:subName, ...result});
-        }
-        fileNext = await fileIter.next();
-      }
-    }
-
-    if(preview.length === 0){
-      onResult({state:"error", msg:"No .xlsx/.xls files found in any subfolders."});
-      return;
-    }
-
-    setTickets(function(prev){
-      let updated = [...prev];
-      for(const p of preview){
-        if(!p.serials.length) continue;
-        const newTicket = {
-          id:uid(), ticketNo:p.ticketNo,
-          date:new Date().toISOString().slice(0,10),
-          site:"", requestor:"", notes:"",
-          expectedAssets:p.serials,
-          itemCounts:p.itemCounts||{lcdMonitors:0,miscBoxes:0,hardDriveBoxes:0,printers:0},
-          pickupScanned:false, pickupResult:null,
-          _importedFrom:p.fileName
-        };
-        const idx = updated.findIndex(function(t){ return t.ticketNo === p.ticketNo; });
-        if(idx !== -1) updated[idx] = newTicket;
-        else updated = [newTicket, ...updated];
-      }
-      return updated;
-    });
-    setVendorReport(null);
-
-    const ok    = preview.filter(function(p){ return p.serials.length > 0 && !p.warning; });
-    const warns = preview.filter(function(p){ return p.warning || p.serials.length === 0; });
-    onResult({state:"done", ok, warns, total:preview.length});
-  } catch(e){
-    if(e.name === "AbortError") return;
-    onResult({state:"error", msg:e.message});
-  }
-}
-
 // Export a structured JSON payload for the TDX PowerShell sync script
 function exportForTdx(tickets){
   const verified = tickets.filter(function(t){
@@ -566,15 +529,6 @@ function exportForTdx(tickets){
   a.download = "AssetTrack-TDX-Export-"+new Date().toISOString().slice(0,10)+".json";
   a.click(); URL.revokeObjectURL(url);
   return verified.length;
-}
-
-// Legacy JSON download fallback
-function downloadSessionJson(tickets, shipments){
-  const blob = new Blob([JSON.stringify({version:5, exportedAt:new Date().toLocaleString(), tickets, shipments, locations, requestors}, null, 2)], {type:"application/json"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a"); a.href=url;
-  a.download = `AssetTrack-Session-${new Date().toISOString().slice(0,10)}.json`;
-  a.click(); URL.revokeObjectURL(url);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -2466,8 +2420,8 @@ function TicketForm({ticket, tickets, locations, requestors, onSave, onCancel, o
       bodyRows.push(["Missing", m.serial||"", "", m.manufacturer||"", m.machineType||"", m.ouInventory||"", ""]);
       rowStyles[idx++] = {fillColor:[254,226,226]};
     });
-    // Extras from assets with source scan-extra-pending
-    (form.assets||[]).filter(function(a){ return a.source==="scan-extra-pending"; }).forEach(function(e){
+    // Extras from pickupResult buckets — same source as the send-time PDF (Build 1a)
+    (resolved.extra||[]).forEach(function(e){
       bodyRows.push(["Extra", "", e.serial||"", "", "", "", ""]);
       rowStyles[idx++] = {fillColor:[219,234,254]};
     });
@@ -3553,31 +3507,6 @@ function PickupScanForm({ticket, onSave, onBack}){
     onBack();
   }
 
-  function buildFinalAssets(resolved){
-    const finalAssets = [];
-    const now = new Date().toLocaleString();
-    function infoFor(serial){ const a=expMap[serial]||{}; return {manufacturer:a.manufacturer||"",machineType:a.machineType||"",ouInventory:a.ouInventory||""}; }
-    // Matched — always included
-    resolved.matched.forEach(function(m){ finalAssets.push({serial:m.serial, ...infoFor(m.serial), addedAt:now, source:"scan"}); });
-    // Partial matches — use scanned serial (scanner is authoritative)
-    resolved.partial.forEach(function(p){
-      if(p.resolution==="accept"){
-        finalAssets.push({serial:p.canonical||p.scannedSerial, ...infoFor(p.expectedSerial), addedAt:now, source:"scan-"+(p.matchKind||"partial")});
-      } else {
-        finalAssets.push({serial:p.scannedSerial, manufacturer:"", machineType:"", ouInventory:"", addedAt:now, source:"scan-extra-pending", approved:null});
-      }
-    });
-    // Linked pairs — use scanned (extra) serial as the correct one, borrow metadata from expected
-    resolved.extra.forEach(function(e){
-      if(e.linkedTo) finalAssets.push({serial:e.serial, ...infoFor(e.linkedTo), addedAt:now, source:"scan-linked"});
-    });
-    // Unlinked extras go to approval — included as pending, requestor can deny
-    resolved.extra.forEach(function(e){
-      if(!e.linkedTo) finalAssets.push({serial:e.serial, manufacturer:"", machineType:"", ouInventory:"", addedAt:now, source:"scan-extra-pending", approved:null});
-    });
-    return finalAssets;
-  }
-
   function generateApprovalPdf(resolved){
     var jspdf = window.jspdf || window.jsPDF;
     var doc = new jspdf.jsPDF({orientation:"landscape", unit:"pt", format:"letter"});
@@ -3786,14 +3715,16 @@ function PickupScanForm({ticket, onSave, onBack}){
 
   function saveAndClose(){
     const resolved = getResolved();
-    const finalAssets = buildFinalAssets(resolved);
+    const fin = finalizePickup(resolved, expMap);
+    const resolvedOut = {...resolved, missing:fin.missing, partial:fin.partial};
+    const keptScans = scanned.filter(function(s){ return fin.rejectedCaptures.indexOf(s)<0; });
     if(needsApproval){
-      generateApprovalPdf(resolved);
+      generateApprovalPdf(resolvedOut);
       const email = ticket.requestor||"";
       if(email){
-        const unlinkedMissing = resolved.missing.filter(function(m){ return !m.linkedTo; });
-        const unlinkedExtra   = resolved.extra.filter(function(e){ return !e.linkedTo; });
-        const corrections     = resolved.missing.filter(function(m){ return m.linkedTo; }).length + actionableCorrections(resolved.partial).length;
+        const unlinkedMissing = resolvedOut.missing.filter(function(m){ return !m.linkedTo; });
+        const unlinkedExtra   = resolvedOut.extra.filter(function(e){ return !e.linkedTo; });
+        const corrections     = resolvedOut.missing.filter(function(m){ return m.linkedTo; }).length + actionableCorrections(resolvedOut.partial).length;
         const subject = encodeURIComponent("IT Asset Disposal Approval Required - Ticket "+ticket.ticketNo);
         const body = encodeURIComponent(
           "Hello,\n\nYour IT asset disposal pickup for ticket "+ticket.ticketNo+" has been completed. The attached CSV lists items that require your approval.\n\n"+
@@ -3804,16 +3735,17 @@ function PickupScanForm({ticket, onSave, onBack}){
         );
         window.location.href = "mailto:"+email+"?subject="+subject+"&body="+body;
       }
-      onSave({...ticket, pickupScanned:true, pickupScanList:scanned, pickupResult:{...resolved, waived:waivedSerialsFrom(waived), waivedLines:Array.from(waived)}, assets:finalAssets, approvalStatus:"awaiting-approval", approvalSentAt:new Date().toLocaleString()});
+      onSave({...ticket, pickupScanned:true, pickupScanList:keptScans, pickupResult:{...resolvedOut, waived:waivedSerialsFrom(waived), waivedLines:Array.from(waived)}, assets:fin.assets, approvalStatus:"awaiting-approval", approvalSentAt:new Date().toLocaleString()});
     } else {
-      onSave({...ticket, pickupScanned:true, pickupScanList:scanned, pickupResult:{...resolved, waived:waivedSerialsFrom(waived), waivedLines:Array.from(waived)}, assets:finalAssets, approvalStatus:undefined});
+      onSave({...ticket, pickupScanned:true, pickupScanList:keptScans, pickupResult:{...resolvedOut, waived:waivedSerialsFrom(waived), waivedLines:Array.from(waived)}, assets:fin.assets, approvalStatus:undefined});
     }
     onBack();
   }
 
   const resolved = getResolved();
-  // With new model: no per-item decisions needed — can always save once compared
-  const canSave = !!result;
+  // Save guard (Build 1a): every correction must be decided before save
+  const undecidedPartials = result ? result.partial.filter(function(p){ var e=effRes(p); return e!=="accept" && e!=="reject"; }).length : 0;
+  const canSave = !!result && undecidedPartials===0;
   // Approval needed if any unlinked missing, unlinked extra, or partial/linked corrections exist
   const needsApproval = result && (
     result.missing.some(function(m){ return !links[m.id]; }) ||
@@ -4090,8 +4022,9 @@ function PickupScanForm({ticket, onSave, onBack}){
             )}
           </div>
 
-          <div style={{display:"flex",justifyContent:"flex-end"}}>
-            <button onClick={saveAndClose} style={{background:"linear-gradient(135deg,#065f46,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"12px 32px",cursor:"pointer",fontSize:14,fontFamily:"inherit",fontWeight:500}}>
+          <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",gap:14}}>
+            {undecidedPartials>0 && <div style={{color:"#fbbf24",fontSize:12}}>{undecidedPartials+" correction"+(undecidedPartials!==1?"s":"")+" undecided — accept or reject each before saving"}</div>}
+            <button onClick={saveAndClose} disabled={!canSave} style={{background:canSave?"linear-gradient(135deg,#065f46,#0284c7)":"#334155",color:canSave?"#fff":"#64748b",border:"none",borderRadius:8,padding:"12px 32px",cursor:canSave?"pointer":"not-allowed",fontSize:14,fontFamily:"inherit",fontWeight:500}}>
               {needsApproval ? "Save & Send for Approval ✉" : "Save & Close Ticket ✓"}
             </button>
           </div>
