@@ -261,7 +261,8 @@ function liveScanStatus(expected, scanned, waivedSet){
     if(bm){ consumed[bm.scanned]=true; rows.push({status:"likely", capture:bm.scanned, kind:bm.kind, distance:bm.distance}); likely++; }
     else { rows.push({status:"pending"}); unaccounted++; }
   });
-  return {rows:rows, matched:matched, likely:likely, unaccounted:unaccounted};
+  var extras=(scanned||[]).filter(function(s){ return !expSet[s] && !consumed[s]; });
+  return {rows:rows, matched:matched, likely:likely, unaccounted:unaccounted, extras:extras};
 }
 // True-no-match test for the scan-time cue: related if the capture IS any
 // expected serial (waived included) or any tier reaches one.
@@ -3363,15 +3364,20 @@ function PickupScanTab({tickets, setTickets, locations, readOnly, routeOrder, se
   return <PickupScanForm ticket={ticket} onSave={saveTicket} onBack={function(){ setSelectedId(null); }}/>;
 }
 
-// No-match thunk (Build 3): lazy context — first call rides a user gesture.
+// No-match cue (Build 3.1): bright two-note negative pop — stays in the range
+// small laptop speakers can actually reproduce; resume() covers autoplay policy.
 var _thunkCtx = null;
 function playThunk(){
   try{
     _thunkCtx = _thunkCtx || new (window.AudioContext||window.webkitAudioContext)();
-    var ctx=_thunkCtx, t0=ctx.currentTime, osc=ctx.createOscillator(), g=ctx.createGain();
-    osc.type="triangle"; osc.frequency.setValueAtTime(160,t0); osc.frequency.exponentialRampToValueAtTime(70,t0+0.1);
-    g.gain.setValueAtTime(0.4,t0); g.gain.exponentialRampToValueAtTime(0.001,t0+0.12);
-    osc.connect(g); g.connect(ctx.destination); osc.start(t0); osc.stop(t0+0.13);
+    var ctx=_thunkCtx; if(ctx.state==="suspended") ctx.resume();
+    var t0=ctx.currentTime;
+    [[830,0],[554,0.12]].forEach(function(n){
+      var osc=ctx.createOscillator(), g=ctx.createGain();
+      osc.type="square"; osc.frequency.setValueAtTime(n[0], t0+n[1]);
+      g.gain.setValueAtTime(0.001,t0+n[1]); g.gain.linearRampToValueAtTime(0.18,t0+n[1]+0.012); g.gain.exponentialRampToValueAtTime(0.001,t0+n[1]+0.11);
+      osc.connect(g); g.connect(ctx.destination); osc.start(t0+n[1]); osc.stop(t0+n[1]+0.12);
+    });
   }catch(e){}
 }
 
@@ -3478,13 +3484,13 @@ function PickupScanForm({ticket, onSave, onBack}){
 
   function addScan(raw){
     const serial = raw.trim().toUpperCase(); if(!serial) return;
-    if(scanned.find(function(s){ return s===serial; })){ setFlash({serial,dup:true}); setTimeout(function(){ setFlash(null); },1400); setInput(""); return; }
+    if(scanned.find(function(s){ return s===serial; })){ setFlash({serial,dup:true}); setInput(""); return; }
     setScanned(function(prev){ return [serial,...prev]; });
     if(!expMap[serial] && !captureRelatesToTicket(serial, expected)){
       if(!muted) playThunk(); // fuzzy-matchable scans stay SILENT by design — amber is their residue
-      setFlash({msg:"\u2717 "+serial+" \u2014 no match on this ticket", dup:true}); setTimeout(function(){ setFlash(null); },2500);
+      setFlash({msg:"\u2717 "+serial+" \u2014 no match on this ticket", dup:true});
     } else {
-      setFlash({serial,dup:false}); setTimeout(function(){ setFlash(null); },800);
+      setFlash({serial,dup:false});
     }
     setInput(""); setResult(null);
   }
@@ -3530,11 +3536,10 @@ function PickupScanForm({ticket, onSave, onBack}){
     var last = current.trim().toUpperCase();
     if(last) parts.push(last);
     if(parts.length <= 1) return; // single value — let the input handle it normally
-    if(rescan){ e.preventDefault(); setFlash({msg:"\u26a0 One serial at a time while rescanning", dup:true}); setTimeout(function(){ setFlash(null); },1800); setInput(""); return; }
+    if(rescan){ e.preventDefault(); setFlash({msg:"\u26a0 One serial at a time while rescanning", dup:true}); setInput(""); return; }
     e.preventDefault();
     var added = addMultiple(parts);
     setFlash({serial: added + " serial" + (added!==1?"s":"") + " added from paste", dup:false, multi:true});
-    setTimeout(function(){ setFlash(null); }, 2500);
     setInput("");
   }
 
@@ -3548,16 +3553,16 @@ function PickupScanForm({ticket, onSave, onBack}){
   function commitRescan(raw){
     var r = applyRescan(scanned, resolutions, links, rescan, raw);
     if(!r.ok){
-      if(r.reason==="dup"){ setFlash({serial:r.serial, dup:true}); setTimeout(function(){ setFlash(null); },1400); }
+      if(r.reason==="dup"){ setFlash({serial:r.serial, dup:true}); }
       setInput(""); return;
     }
     setScanned(r.scanned); setResolutions(r.resolutions); setLinks(r.links); setInput("");
     runComparison(new Set(waived), r.scanned); // in-place: sibling decisions survive
     if(!expMap[r.serial] && !captureRelatesToTicket(r.serial, expected)){
       if(!muted) playThunk();
-      setFlash({msg:"\u2717 "+r.serial+" \u2014 no match on this ticket", dup:true}); setTimeout(function(){ setFlash(null); },2500);
+      setFlash({msg:"\u2717 "+r.serial+" \u2014 no match on this ticket", dup:true});
     } else {
-      setFlash({msg:"\u2713 Rescanned: "+r.serial, dup:false}); setTimeout(function(){ setFlash(null); },1400);
+      setFlash({msg:"\u2713 Rescanned: "+r.serial, dup:false});
     }
   }
 
@@ -4051,6 +4056,31 @@ function PickupScanForm({ticket, onSave, onBack}){
                           </React.Fragment>
                         )}
                       </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+
+      {!result && !directPickup && live.extras.length>0 && (
+        <details open style={{marginBottom:16}}>
+          <summary style={{cursor:"pointer",fontSize:12,color:"#94a3b8",padding:"10px 0",userSelect:"none",display:"flex",alignItems:"center",gap:8,listStyle:"none"}}>
+            <span style={{fontSize:13}}>{"\u25be"}</span>
+            <span style={{fontFamily:"'Geist',sans-serif",fontWeight:700,color:"#e2e8f0"}}>Extras</span>
+            <span style={{color:"#475569"}}>({live.extras.length})</span>
+            <span style={{marginLeft:"auto",fontSize:11,color:"#fca5a5"}}>not on this ticket</span>
+          </summary>
+          <div style={{background:"#0f172a",borderRadius:10,border:"1px solid #1e293b",marginTop:6,overflowY:"auto",maxHeight:200}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <tbody>
+                {live.extras.map(function(s){
+                  return (
+                    <tr key={s} style={{borderBottom:"1px solid #0f172a"}}>
+                      <td style={{padding:"7px 12px",fontFamily:"'Geist Mono',monospace",letterSpacing:0.8,color:"#fca5a5"}}>{s}</td>
+                      <td style={{padding:"7px 12px",textAlign:"right"}}><button className="del-btn" onClick={function(){ removeScan(s); }} style={{background:"none",border:"none",color:"#ef4444",cursor:"pointer",fontSize:16}}>×</button></td>
                     </tr>
                   );
                 })}

@@ -150,5 +150,26 @@ t("relates: stranger does not relate",
 t("relates: short junk below all tiers",
   captureRelatesToTicket("AB123", exp(["CD456"])), false);
 
+// \u2500\u2500 live extras (Build 3.1): the unaccounted captures \u2500\u2500
+// 30. Stranger capture is listed as an extra
+t("extras: stranger listed",
+  liveScanStatus(exp(["ABCD1234"]), ["ZZZZ9999XXXX"], new Set()).extras,
+  ["ZZZZ9999XXXX"]);
+
+// 31. A capture consumed as likely is NOT an extra
+t("extras: consumed likely capture excluded",
+  liveScanStatus(exp(["C02GMCAJDV7L"]), ["C02MCAJDV7L"], new Set()).extras,
+  []);
+
+// 32. An exact-expected capture is NOT an extra
+t("extras: exact capture excluded",
+  liveScanStatus(exp(["ABC12345"]), ["ABC12345"], new Set()).extras,
+  []);
+
+// 33. A capture equal to a WAIVED row's serial is still ticket-owned, not an extra
+t("extras: waived row's serial excluded",
+  liveScanStatus(exp(["ABC12345"]), ["ABC12345"], new Set([0])).extras,
+  []);
+
 console.log(pass + " passed, " + fail + " failed");
 process.exit(fail ? 1 : 0);
