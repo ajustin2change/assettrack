@@ -3606,6 +3606,7 @@ function PickupScanForm({ticket, onSave, onBack}){
     });
 
     setResult({matched, missing, extra, partial, waived:Array.from(w), scannedAt:new Date().toLocaleString()});
+    setFlash(null); // a recompute ends the scan session the banner narrates
     setRescan(null); // any recompute disarms an in-flight rescan
     if(inPlace){
       // Prune links to pairs whose BOTH ids still exist as missing/extra;
