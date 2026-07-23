@@ -246,6 +246,32 @@ function bestMatch(expSerial, pool){
   if(fuzzy) return {kind:"fuzzy", scanned:fuzzy.scanned, canonical:fuzzy.scTok, expToken:fuzzy.expTok, scanToken:fuzzy.scTok, distance:fuzzy.distance};
   return null;
 }
+// ── Live matcher helper (Build 3) ──
+// Read-only mirror of runComparison's in-order pass, so the scan page tells the
+// same truth Compare will: exact-scanned = matched; any bestMatch tier = likely.
+function liveScanStatus(expected, scanned, waivedSet){
+  var expSet={}; expected.forEach(function(a){ expSet[a.serial]=true; });
+  var scannedSet={}; (scanned||[]).forEach(function(s){ scannedSet[s]=true; });
+  var consumed={}; var rows=[], matched=0, likely=0, unaccounted=0;
+  expected.forEach(function(a, idx){
+    if(waivedSet && waivedSet.has(idx)){ rows.push({status:"waived"}); return; }
+    if(scannedSet[a.serial]){ rows.push({status:"matched"}); matched++; return; }
+    var pool=(scanned||[]).filter(function(s){ return !expSet[s] && !consumed[s]; });
+    var bm=bestMatch(a.serial, pool);
+    if(bm){ consumed[bm.scanned]=true; rows.push({status:"likely", capture:bm.scanned, kind:bm.kind, distance:bm.distance}); likely++; }
+    else { rows.push({status:"pending"}); unaccounted++; }
+  });
+  return {rows:rows, matched:matched, likely:likely, unaccounted:unaccounted};
+}
+// True-no-match test for the scan-time cue: related if the capture IS any
+// expected serial (waived included) or any tier reaches one.
+function captureRelatesToTicket(capture, expected){
+  for(var i=0;i<expected.length;i++){
+    if(expected[i].serial===capture) return true;
+    if(bestMatch(expected[i].serial, [capture])) return true;
+  }
+  return false;
+}
 // ── No-op corrections (approval-exempt) ──
 // A "no-op" correction: an exact-token match — auto ("exact") or review-tier
 // ("exact-review": containment / 7-char token, accepted by the operator) —
@@ -3337,6 +3363,18 @@ function PickupScanTab({tickets, setTickets, locations, readOnly, routeOrder, se
   return <PickupScanForm ticket={ticket} onSave={saveTicket} onBack={function(){ setSelectedId(null); }}/>;
 }
 
+// No-match thunk (Build 3): lazy context — first call rides a user gesture.
+var _thunkCtx = null;
+function playThunk(){
+  try{
+    _thunkCtx = _thunkCtx || new (window.AudioContext||window.webkitAudioContext)();
+    var ctx=_thunkCtx, t0=ctx.currentTime, osc=ctx.createOscillator(), g=ctx.createGain();
+    osc.type="triangle"; osc.frequency.setValueAtTime(160,t0); osc.frequency.exponentialRampToValueAtTime(70,t0+0.1);
+    g.gain.setValueAtTime(0.4,t0); g.gain.exponentialRampToValueAtTime(0.001,t0+0.12);
+    osc.connect(g); g.connect(ctx.destination); osc.start(t0); osc.stop(t0+0.13);
+  }catch(e){}
+}
+
 function PickupScanForm({ticket, onSave, onBack}){
   const expected = ticket.expectedAssets || [];
   const expMap   = {};
@@ -3374,6 +3412,9 @@ function PickupScanForm({ticket, onSave, onBack}){
   const [links, setLinks]           = useState({});    // {missingId: extraId, extraId: missingId}
   const [rescan, setRescan]         = useState(null);  // armed rescan target {rowId,kind,removedSerial,expectedSerial}
   const inputRef = useRef();
+  const [muted, setMuted] = useState(false); // no-match thunk toggle, session-scoped
+  // Live matcher view (Build 3): same primitives as Compare, read-only.
+  const live = useMemo(function(){ return liveScanStatus(expected, scanned, waived); }, [scanned, waived]);
   useEffect(function(){ if(inputRef.current && !directPickup) inputRef.current.focus(); }, []);
 
   function linkPair(missingId, extraId){
@@ -3439,7 +3480,12 @@ function PickupScanForm({ticket, onSave, onBack}){
     const serial = raw.trim().toUpperCase(); if(!serial) return;
     if(scanned.find(function(s){ return s===serial; })){ setFlash({serial,dup:true}); setTimeout(function(){ setFlash(null); },1400); setInput(""); return; }
     setScanned(function(prev){ return [serial,...prev]; });
-    setFlash({serial,dup:false}); setTimeout(function(){ setFlash(null); },800);
+    if(!expMap[serial] && !captureRelatesToTicket(serial, expected)){
+      if(!muted) playThunk(); // fuzzy-matchable scans stay SILENT by design — amber is their residue
+      setFlash({msg:"\u2717 "+serial+" \u2014 no match on this ticket", dup:true}); setTimeout(function(){ setFlash(null); },2500);
+    } else {
+      setFlash({serial,dup:false}); setTimeout(function(){ setFlash(null); },800);
+    }
     setInput(""); setResult(null);
   }
 
@@ -3507,7 +3553,12 @@ function PickupScanForm({ticket, onSave, onBack}){
     }
     setScanned(r.scanned); setResolutions(r.resolutions); setLinks(r.links); setInput("");
     runComparison(new Set(waived), r.scanned); // in-place: sibling decisions survive
-    setFlash({msg:"\u2713 Rescanned: "+r.serial, dup:false}); setTimeout(function(){ setFlash(null); },1400);
+    if(!expMap[r.serial] && !captureRelatesToTicket(r.serial, expected)){
+      if(!muted) playThunk();
+      setFlash({msg:"\u2717 "+r.serial+" \u2014 no match on this ticket", dup:true}); setTimeout(function(){ setFlash(null); },2500);
+    } else {
+      setFlash({msg:"\u2713 Rescanned: "+r.serial, dup:false}); setTimeout(function(){ setFlash(null); },1400);
+    }
   }
 
   function runComparison(waivedOverride, scannedOverride){
@@ -3923,6 +3974,7 @@ function PickupScanForm({ticket, onSave, onBack}){
             onFocus={function(){ setFocus(true); }} onBlur={function(){ setFocus(false); }}
             placeholder="Serial numbers"
             style={{flex:1,background:"#0f172a",border:`2px solid ${focus?"#3b82f6":"#334155"}`,borderRadius:8,color:"#f1f5f9",padding:"11px 14px",fontSize:14,fontFamily:"inherit",letterSpacing:1,transition:"border-color 0.2s"}}/>
+          <button onClick={function(){ setMuted(function(m){ return !m; }); }} title={muted?"No-match sound: off":"No-match sound: on"} style={{background:"#0f172a",color:muted?"#475569":"#94a3b8",border:"1px solid #334155",borderRadius:8,padding:"11px 13px",cursor:"pointer",fontSize:15,fontFamily:"inherit"}}>{muted?"\uD83D\uDD07":"\uD83D\uDD0A"}</button>
           <button onClick={function(){ if(rescan) commitRescan(input); else addScan(input); }} style={{background:"linear-gradient(135deg,#1d4ed8,#0284c7)",color:"#fff",border:"none",borderRadius:8,padding:"11px 20px",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>Add</button>
         </div>
         {flash && <div style={{padding:"7px 12px",borderRadius:6,fontSize:13,background:flash.dup?"#450a0a":"#052e16",color:flash.dup?"#fca5a5":"#86efac",border:`1px solid ${flash.dup?"#7f1d1d":"#166534"}`}}>
@@ -3946,7 +3998,7 @@ function PickupScanForm({ticket, onSave, onBack}){
             <span style={{color:"#475569"}}>({expected.length})</span>
             <span style={{marginLeft:"auto",fontSize:11,display:"flex",gap:12,alignItems:"center"}}>
               {waived.size>0 && <span style={{color:"#a78bfa"}}>⊘ {waived.size} waived</span>}
-              <span style={{color:"#86efac"}}>{scanned.filter(function(s){ return expected.some(function(a){ return a.serial===s; }); }).length} / {expected.length - waived.size} scanned</span>
+              <span><span style={{color:"#86efac"}}>{live.matched} matched</span><span style={{color:"#475569"}}>{" \u00b7 "}</span><span style={{color:"#fcd34d"}}>{live.likely} likely</span><span style={{color:"#475569"}}>{" \u00b7 "}</span><span style={{color:"#94a3b8"}}>{live.unaccounted} unaccounted</span></span>
             </span>
           </summary>
           <div style={{background:"#0f172a",borderRadius:10,border:"1px solid #1e293b",marginTop:6,overflowY:"auto",maxHeight:320}}>
@@ -3964,14 +4016,17 @@ function PickupScanForm({ticket, onSave, onBack}){
                 {expected.map(function(a, idx){
                   const isScanned = scanned.includes(a.serial);
                   const isWaived  = waived.has(idx);
-                  const rowBg = isWaived ? "#1a0a2e44" : isScanned ? "#052e1688" : "transparent";
-                  const serialColor = isWaived ? "#4c1d95" : isScanned ? "#86efac" : "#e2e8f0";
+                  const lv = live.rows[idx] || {};
+                  const isLikely = !isWaived && !isScanned && lv.status==="likely";
+                  const rowBg = isWaived ? "#1a0a2e44" : isScanned ? "#052e1688" : isLikely ? "#42200633" : "transparent";
+                  const serialColor = isWaived ? "#4c1d95" : isScanned ? "#86efac" : isLikely ? "#fcd34d" : "#e2e8f0";
                   const textDeco = (isWaived || isScanned) ? "line-through" : "none";
                   return (
                     <tr key={idx} style={{borderBottom:"1px solid #0f172a",background:rowBg,transition:"background 0.2s",opacity:isWaived?0.5:1}}>
                       <td style={{padding:"8px 12px",fontFamily:"'Geist Mono',monospace",letterSpacing:0.8,fontSize:12,textDecoration:textDeco}}>
                         <span style={{color:a.duplicate&&!isWaived&&!isScanned?"#fde047":serialColor}}>{a.serial}</span>
                         {a.duplicate&&<span style={{marginLeft:7,fontSize:10,color:"#a16207",background:"#422006",border:"1px solid #a16207",borderRadius:4,padding:"1px 5px"}}>dup</span>}
+                        {isLikely && <div style={{fontSize:10,color:"#a16207",marginTop:2,fontFamily:"'Geist Mono',monospace"}}>{"\u2248 "+lv.capture+" \u00b7 "+(lv.distance>0?lv.distance+" off":"embedded")}</div>}
                       </td>
                       <td style={{padding:"8px 12px",color:"#64748b",fontSize:11}}>{a.manufacturer||"—"}</td>
                       <td style={{padding:"8px 12px",color:"#64748b",fontSize:11}}>{a.machineType||"—"}</td>
@@ -3984,6 +4039,11 @@ function PickupScanForm({ticket, onSave, onBack}){
                           </React.Fragment>
                         ) : isScanned ? (
                           <span style={{color:"#86efac",fontSize:11}}>✓ Scanned</span>
+                        ) : isLikely ? (
+                          <React.Fragment>
+                            <span style={{color:"#fcd34d",fontSize:11,marginRight:8}}>{"\u2248 Likely"}</span>
+                            <button onClick={function(){ toggleWaive(idx); }} style={{background:"#0f172a",color:"#64748b",border:"1px solid #334155",borderRadius:4,padding:"2px 8px",cursor:"pointer",fontSize:10,fontFamily:"inherit"}} title="Mark as Waived — will not count as missing">Waive</button>
+                          </React.Fragment>
                         ) : (
                           <React.Fragment>
                             <span style={{color:"#475569",fontSize:11,marginRight:8}}>Pending</span>

@@ -1,6 +1,7 @@
 // Standalone unit tests for the AssetTrack serial matcher.
 // Usage: node matcher_tests.js [path/to/index.html]   (default ./index.html)
-// Extracts levenshtein/extractIdentifiers/constants/bestMatch from the app
+// Extracts levenshtein/extractIdentifiers/constants/bestMatch and the Build 3
+// live helpers (liveScanStatus/captureRelatesToTicket) from the app
 // file and exercises them — keep this in the repo and run after ANY matcher edit.
 const fs = require("fs");
 const file = process.argv[2] || "./index.html";
@@ -87,6 +88,67 @@ t("kept: fuzzy is never no-op",
   noop({matchKind:"fuzzy", canonical:"C02MCAJDV7L", expectedSerial:"C02GMCAJDV7L", resolution:"accept"}), false);
 t("noop: case-insensitive serial compare",
   noop({matchKind:"exact", canonical:"PF0DBAV8", expectedSerial:"pf0dbav8", resolution:"accept"}), true);
+
+// \u2500\u2500 liveScanStatus / captureRelatesToTicket (Build 3 live matcher helper) \u2500\u2500
+function exp(list){ return list.map(function(s){ return {serial:s}; }); }
+function counts(r){ return {matched:r.matched, likely:r.likely, unaccounted:r.unaccounted}; }
+function rowAt(r,i){ var x=r.rows[i]||{}; return {status:x.status, capture:x.capture===undefined?null:x.capture}; }
+
+// 18. Exact scan -> matched
+t("live: exact scanned is matched",
+  counts(liveScanStatus(exp(["ABC12345"]), ["ABC12345"], new Set())),
+  {matched:1, likely:0, unaccounted:0});
+
+// 19. Fuzzy capture -> likely, capture recorded
+t("live: fuzzy capture is likely",
+  rowAt(liveScanStatus(exp(["C02GMCAJDV7L"]), ["C02MCAJDV7L"], new Set()), 0),
+  {status:"likely", capture:"C02MCAJDV7L"});
+
+// 20. Compound containment capture -> likely
+t("live: containment capture is likely",
+  rowAt(liveScanStatus(exp(["PF0DBAV8"]), ["1S20DF00EDUSPF0DBAV8"], new Set()), 0),
+  {status:"likely", capture:"1S20DF00EDUSPF0DBAV8"});
+
+// 21. 7-char shared token -> likely (review tier counts as accounted-for)
+t("live: 7-char token capture is likely",
+  rowAt(liveScanStatus(exp(["AB12345X"]), ["JUNK AB12345X JUNK"], new Set()), 0),
+  {status:"likely", capture:"JUNK AB12345X JUNK"});
+
+// 22. Stranger capture -> row pending, unaccounted counts it
+t("live: stranger leaves row pending",
+  counts(liveScanStatus(exp(["ABCD1234"]), ["ZZZZ9999XXXX"], new Set())),
+  {matched:0, likely:0, unaccounted:1});
+
+// 23. Waived line excluded from ALL counts
+t("live: waived row excluded from counts",
+  counts(liveScanStatus(exp(["ABCD1234","EFGH5678"]), ["EFGH5678"], new Set([0]))),
+  {matched:1, likely:0, unaccounted:0});
+
+// 24. Consume-once: one fuzzy capture accounts for the FIRST close row only
+t("live: capture consumed once, in expected order",
+  (function(){ var r=liveScanStatus(exp(["ABCD12345","ABCD12346"]), ["ABCD12347"], new Set()); return [rowAt(r,0).status, rowAt(r,1).status]; })(),
+  ["likely","pending"]);
+
+// 25. A capture that IS another expected serial stays out of the fuzzy pool
+t("live: exact-owned capture never feeds a sibling row",
+  (function(){ var r=liveScanStatus(exp(["ABCD12345","ABCD12346"]), ["ABCD12346"], new Set()); return [rowAt(r,0).status, rowAt(r,1).status]; })(),
+  ["pending","matched"]);
+
+// 26. relates: exact expected serial (incl. waived rows scanned by hand)
+t("relates: exact serial relates",
+  captureRelatesToTicket("ABC12345", exp(["ABC12345"])), true);
+
+// 27. relates: fuzzy reach relates -> stays SILENT (no thunk)
+t("relates: fuzzy reach relates",
+  captureRelatesToTicket("C02MCAJDV7L", exp(["C02GMCAJDV7L"])), true);
+
+// 28. relates: true stranger -> false (this is the thunk)
+t("relates: stranger does not relate",
+  captureRelatesToTicket("ZZZZ9999XXXX", exp(["ABCD1234"])), false);
+
+// 29. relates: sub-threshold short capture vs different short serial -> thunk
+t("relates: short junk below all tiers",
+  captureRelatesToTicket("AB123", exp(["CD456"])), false);
 
 console.log(pass + " passed, " + fail + " failed");
 process.exit(fail ? 1 : 0);
